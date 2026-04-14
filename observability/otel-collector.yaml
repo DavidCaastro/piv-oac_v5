@@ -1,0 +1,61 @@
+# observability/otel-collector.yaml
+# PIV/OAC v5.0 — OpenTelemetry Collector configuration
+#
+# Receives logs and traces from sdk/metrics/collector.py (fire-and-forget).
+# Routes: logs → Loki, traces → Tempo.
+# If Collector is down: SDK silently skips OTEL send (file log is sufficient).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 512
+
+  # Add PIV/OAC resource attributes to every span/log
+  resource:
+    attributes:
+      - key: service.name
+        value: piv-oac
+        action: upsert
+      - key: service.version
+        value: "5.0.0"
+        action: upsert
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 50
+
+exporters:
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+    default_labels_enabled:
+      exporter: false
+      job: true
+
+  otlp/tempo:
+    endpoint: http://tempo:4317
+    tls:
+      insecure: true
+
+  # Debug exporter (stdout) — disabled in production
+  # debug:
+  #   verbosity: detailed
+
+service:
+  pipelines:
+    logs:
+      receivers:  [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters:  [loki]
+
+    traces:
+      receivers:  [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters:  [otlp/tempo]

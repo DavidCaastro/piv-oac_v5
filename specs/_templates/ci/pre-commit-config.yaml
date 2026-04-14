@@ -1,0 +1,41 @@
+# specs/_templates/ci/pre-commit-config.yaml
+# Template used by `piv-oac init` (Mode 2) to seed .pre-commit-config.yaml
+# in the user's existing project repository.
+#
+# Difference from the framework's own .pre-commit-config.yaml:
+#   - Ruff file scope adjusted to project source ({{ source_dir }} variable)
+#   - markdownlint scoped to project docs/ folder
+#   - shellcheck only if bootstrap.sh is present
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.0
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        files: ^{{ source_dir }}/
+      - id: ruff-format
+        files: ^{{ source_dir }}/
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--unsafe]
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+default_language_version:
+  python: python3.11
+
+fail_fast: false

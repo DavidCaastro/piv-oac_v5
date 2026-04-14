@@ -1,0 +1,88 @@
+---
+# observability/docker-compose.yml
+# PIV/OAC v5.0 — Optional Grafana observability stack
+#
+# Activation: piv observe:start   (delegates to sys/bootstrap.sh)
+# Shutdown:   piv observe:stop
+#
+# Stack: Loki (logs) + Tempo (traces) + Grafana (dashboards) + OTEL Collector (ingest)
+# Total footprint: ~470MB RAM, ~0.6 cores (with resource limits enforced)
+#
+# NOT started automatically during agent sessions.
+# sdk/metrics/collector.py writes to logs/ (primary, always).
+# OTEL send is fire-and-forget secondary — never blocks session.
+
+services:
+  loki:
+    image: grafana/loki:2.9.0
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.2"
+    restart: unless-stopped
+    volumes:
+      - loki-data:/loki
+
+  tempo:
+    image: grafana/tempo:2.3.0
+    command: -config.file=/etc/tempo.yaml
+    ports:
+      - "3200:3200"
+      - "4317:4317"    # OTEL gRPC receiver (used by sdk/metrics/collector.py)
+      - "4318:4318"    # OTEL HTTP receiver
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.2"
+    restart: unless-stopped
+    volumes:
+      - tempo-data:/var/tempo
+
+  grafana:
+    image: grafana/grafana:10.2.0
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/var/lib/grafana/dashboards/sessions.json
+    deploy:
+      resources:
+        limits:
+          memory: 150m
+          cpus: "0.1"
+    restart: unless-stopped
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./dashboards:/var/lib/grafana/dashboards
+    depends_on:
+      - loki
+      - tempo
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.91.0
+    command: ["--config=/etc/otel-collector.yaml"]
+    ports:
+      - "4317:4317"    # gRPC (Tempo forwards here)
+      - "4318:4318"    # HTTP
+    deploy:
+      resources:
+        limits:
+          memory: 64m
+          cpus: "0.1"
+    restart: unless-stopped
+    volumes:
+      - ./otel-collector.yaml:/etc/otel-collector.yaml
+    depends_on:
+      - loki
+      - tempo
+
+volumes:
+  loki-data:
+  tempo-data:
+  grafana-data:

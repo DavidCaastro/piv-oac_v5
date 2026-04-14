@@ -1,0 +1,53 @@
+# PIV/OAC v5.0 — gitignore
+
+# Session state (runtime, not versioned)
+.piv/
+
+# Worktrees (local filesystem paths, not versioned)
+worktrees/
+
+# Active specs (generated per session, not versioned)
+specs/active/
+
+# Logs (local only, never versioned)
+logs/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Package distribution
+*.whl
+*.tar.gz
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

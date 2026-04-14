@@ -1,0 +1,29 @@
+{
+  "_meta": {
+    "version": "5.0.0",
+    "schema": 1,
+    "description": "SHA-256 manifest for skills/*.md. Verified by sdk/utils/sha256.py before any skill is loaded.",
+    "note": "All hashes are PENDING — update with actual values after skill files are written. Run: python -c \"import hashlib, json, pathlib; m=json.load(open('skills/manifest.json')); [m.update({n: hashlib.sha256(pathlib.Path(f'skills/{n}.md').read_bytes()).hexdigest()}) for n in list(m.keys()) if not n.startswith('_')]; json.dump(m, open('skills/manifest.json','w'), indent=2)\""
+  },
+  "observability": "PENDING",
+  "context-management": "PENDING",
+  "session-continuity": "PENDING",
+  "injection-defense": "PENDING",
+  "git-branch-automation": "PENDING",
+  "worktree-automation": "PENDING",
+  "complexity-analysis": "PENDING",
+  "spec-writing": "PENDING",
+  "dag-design": "PENDING",
+  "parallel-safety": "PENDING",
+  "evaluation-rubric": "PENDING",
+  "compliance-scoping": "PENDING",
+  "coherence-analysis": "PENDING",
+  "documentation-generation": "PENDING",
+  "research-methodology": "PENDING",
+  "token-budget-estimation": "PENDING",
+  "engram-management": "PENDING",
+  "gate-protocol": "PENDING",
+  "provider-routing": "PENDING",
+  "vault-protocol": "PENDING",
+  "metrics-collection": "PENDING"
+}

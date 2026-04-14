@@ -1,0 +1,77 @@
+# .pre-commit-config.yaml — PIV/OAC v5.0
+# Install: pre-commit install  (runs automatically before each git commit)
+# Manual:  pre-commit run --all-files
+
+repos:
+  # ---------------------------------------------------------------------------
+  # 1. Ruff — linting + formatting (replaces flake8 + isort + black)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.0
+    hooks:
+      - id: ruff
+        name: ruff-lint
+        args: [--fix, --exit-non-zero-on-fix]
+        files: ^sdk/
+      - id: ruff-format
+        name: ruff-format
+        files: ^sdk/
+
+  # ---------------------------------------------------------------------------
+  # 2. Secret detection — no credentials committed
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.2
+    hooks:
+      - id: gitleaks
+        name: gitleaks-secret-scan
+        # Scans staged files for secrets before commit
+
+  # ---------------------------------------------------------------------------
+  # 3. File hygiene
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        files: \.(py|md|yaml|yml|json|toml|sh)$
+      - id: end-of-file-fixer
+        files: \.(py|md|yaml|yml|json|toml|sh)$
+      - id: check-yaml
+        args: [--unsafe]   # allows custom tags in docker-compose.yml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # ---------------------------------------------------------------------------
+  # 4. Shell scripts
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.9.0.6
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        files: ^sys/bootstrap\.sh$
+        args: [--severity=warning]
+
+  # ---------------------------------------------------------------------------
+  # 5. Markdown
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.39.0
+    hooks:
+      - id: markdownlint
+        name: markdownlint
+        files: \.(md)$
+        args: [--config, .markdownlint.yaml]
+        # .markdownlint.yaml is optional — if absent, uses permissive defaults
+
+# ---------------------------------------------------------------------------
+# Global settings
+# ---------------------------------------------------------------------------
+default_language_version:
+  python: python3.11
+
+fail_fast: false   # run all hooks even if one fails, then report all failures

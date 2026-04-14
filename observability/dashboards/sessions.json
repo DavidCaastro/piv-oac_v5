@@ -1,0 +1,77 @@
+{
+  "__inputs": [],
+  "__requires": [
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.2.0" },
+    { "type": "datasource", "id": "loki", "name": "Loki", "version": "1.0.0" }
+  ],
+  "annotations": { "list": [] },
+  "description": "PIV/OAC v5.0 — Session overview: phases, agents, token usage",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Total Sessions (24h)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "count_over_time({service_name=\"piv-oac\", action=\"session_start\"}[24h])",
+          "legendFormat": "sessions"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Completed Sessions (24h)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "count_over_time({service_name=\"piv-oac\", action=\"session_close\", outcome=\"COMPLETED\"}[24h])",
+          "legendFormat": "completed"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Failed Sessions (24h)",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "count_over_time({service_name=\"piv-oac\", action=\"session_close\", outcome=\"FAILED\"}[24h])",
+          "legendFormat": "failed"
+        }
+      ],
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 }
+    },
+    {
+      "id": 4,
+      "type": "logs",
+      "title": "Recent Session Events",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "targets": [
+        {
+          "expr": "{service_name=\"piv-oac\"} | json | level != \"DEBUG\"",
+          "legendFormat": ""
+        }
+      ],
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 4 }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["piv-oac", "sessions"],
+  "time": { "from": "now-24h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "PIV/OAC — Sessions",
+  "uid": "pivoac-sessions",
+  "version": 1
+}
