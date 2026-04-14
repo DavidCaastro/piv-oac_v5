@@ -30,6 +30,7 @@ from sdk.core.session import CheckpointType, SessionManager
 from sdk.gates.evaluator import GateContext, GateEvaluator, GateType, GateVerdict
 from sdk.metrics import TelemetryLogger
 from sdk.providers.base import ProviderRequest, ProviderResponse
+from sdk.tools import BlockedByToolError, SafeLocalExecutor
 from sdk.utils.complexity import ComplexityClassifier
 from sdk.vault import Vault
 
@@ -86,6 +87,7 @@ class AsyncSession:
         self._session_mgr = SessionManager(self._repo_root)
         self._telemetry: TelemetryLogger | None = None
         self._gate_eval = GateEvaluator()
+        self._executor = SafeLocalExecutor(project_root=self._repo_root)
 
     @classmethod
     def init(
@@ -202,6 +204,27 @@ class AsyncSession:
                                 warnings=warnings,
                             )
 
+            # GATE 2b — lint + pytest MUST pass before closure (Tier 1, blocking)
+            lint_result = await self._executor.run("run_lint")
+            self._log(session_id, "GATE_2B", "run_lint",
+                      "OK" if lint_result.success else "FAIL", 1, 0,
+                      {"exit": lint_result.returncode, "truncated": lint_result.truncated})
+
+            pytest_result = await self._executor.run("run_pytest", ["-q", "--tb=short"])
+            self._log(session_id, "GATE_2B", "run_pytest",
+                      "OK" if pytest_result.success else "FAIL", 1, 0,
+                      {"exit": pytest_result.returncode, "truncated": pytest_result.truncated})
+
+            if not lint_result.success or not pytest_result.success:
+                failed_tool = lint_result if not lint_result.success else pytest_result
+                self._session_mgr.close(session_id, status="failed")  # type: ignore
+                raise BlockedByToolError(failed_tool.to_agent_summary())
+
+            gate_verdicts["GATE_2B"] = "APPROVED"
+
+            # Prune stale worktree refs after all experts finished
+            await self._executor.run("worktree_prune")
+
             # PHASE 8 — Session closure
             self._session_mgr.close(session_id)
             self._log(session_id, "PHASE_8", "session_close", "COMPLETED", 1, 0,
@@ -239,6 +262,13 @@ class AsyncSession:
         """
         start_ms = _now_ms()
         expert_id = f"SpecialistAgent-{session_id[:8]}-{node.node_id}"
+        wt_name   = f"{session_id[:8]}-{node.node_id}"
+
+        # Worktree creation (Tier 1 — SafeLocalExecutor, non-fatal on failure)
+        wt_result = await self._executor.run("worktree_add", [wt_name, expert_id])
+        if not wt_result.success:
+            self._log(session_id, "PHASE_5", "worktree_add_warn", "WARN", 1, 0,
+                      {"wt_name": wt_name, "stderr": wt_result.stderr[:200]})
 
         try:
             # Load agent config (FrameworkLoader — Tier 1)
@@ -278,6 +308,7 @@ class AsyncSession:
                       response.output_tokens,
                       {"expert_id": expert_id, "node_id": node.node_id})
 
+            await self._executor.run("worktree_remove", [wt_name])
             return ExpertResult(
                 expert_id=expert_id,
                 node_id=node.node_id,
@@ -291,6 +322,7 @@ class AsyncSession:
             duration = _now_ms() - start_ms
             self._log(session_id, "PHASE_5", "specialist_error", "ERROR", 2, 0,
                       {"expert_id": expert_id, "node_id": node.node_id, "error": str(exc)})
+            await self._executor.run("worktree_remove", [wt_name])
             return ExpertResult(
                 expert_id=expert_id,
                 node_id=node.node_id,
