@@ -172,6 +172,16 @@ class AsyncSession:
             self._session_mgr.update(session_id, {"dag": active_dag.to_dict(), "phase": "PHASE_1"})
             self._log(session_id, "PHASE_1", "dag_build", "OK", 1, 0,
                       {"node_count": len(active_dag.nodes)})
+            # PMIA: checkpoint after DAG confirmed
+            self._broker.send(checkpoint_req(
+                agent_id="AsyncSession",
+                session_id=session_id,
+                phase="PHASE_1",
+                state_summary=(
+                    f"DAG built: {len(active_dag.nodes)} node(s). "
+                    f"Complexity={classification.level} fast_track={classification.fast_track}."
+                ),
+            ))
 
             # PHASE 2 — Gate 0 for Level 1 fast-track
             if classification.fast_track:
@@ -212,26 +222,39 @@ class AsyncSession:
                         consecutive_rejections += 1
                         warnings.append(f"Expert {result.expert_id} failed: {result.error}")
 
-                        if consecutive_rejections >= GateEvaluator.CIRCUIT_BREAKER_THRESHOLD:
-                            # PMIA: escalate circuit breaker via broker
-                            self._broker.send(escalation(
-                                agent_id="AsyncSession",
-                                session_id=session_id,
-                                reason=EscalationReason.UNRESOLVABLE_CONFLICT,
-                                context=f"Circuit breaker: {consecutive_rejections} consecutive failures",
-                            ))
-                            self._session_mgr.close(session_id, status="failed")  # type: ignore
-                            _result_for_index = AsyncSessionResult(
-                                session_id=session_id,
-                                objective=objective,
-                                status="circuit_breaker",
-                                expert_results=all_expert_results,
-                                gate_verdicts=gate_verdicts,
-                                total_tokens=total_tokens,
-                                duration_ms=_now_ms() - start_ms,
-                                warnings=warnings,
-                            )
-                            return _result_for_index
+                if consecutive_rejections >= GateEvaluator.CIRCUIT_BREAKER_THRESHOLD:
+                    # PMIA: escalate circuit breaker via broker
+                    self._broker.send(escalation(
+                        agent_id="AsyncSession",
+                        session_id=session_id,
+                        reason=EscalationReason.UNRESOLVABLE_CONFLICT,
+                        context=f"Circuit breaker: {consecutive_rejections} consecutive failures",
+                    ))
+                    self._session_mgr.close(session_id, status="failed")  # type: ignore
+                    _result_for_index = AsyncSessionResult(
+                        session_id=session_id,
+                        objective=objective,
+                        status="circuit_breaker",
+                        expert_results=all_expert_results,
+                        gate_verdicts=gate_verdicts,
+                        total_tokens=total_tokens,
+                        duration_ms=_now_ms() - start_ms,
+                        warnings=warnings,
+                    )
+                    return _result_for_index
+
+                # PMIA: checkpoint after each batch (success or partial failure)
+                done_count  = len(completed_ids)
+                total_nodes = len(active_dag.nodes)
+                self._broker.send(checkpoint_req(
+                    agent_id="AsyncSession",
+                    session_id=session_id,
+                    phase="PHASE_5",
+                    state_summary=(
+                        f"Batch done: {done_count}/{total_nodes} nodes completed. "
+                        f"tokens_so_far={total_tokens} failures={consecutive_rejections}."
+                    ),
+                ))
 
             # GATE 2b — lint + pytest MUST pass before closure (Tier 1, blocking)
             lint_result = await self._executor.run("run_lint")
@@ -276,11 +299,32 @@ class AsyncSession:
                 rationale="lint and pytest passed",
             ))
             gate_verdicts["GATE_2B"] = "APPROVED"
+            # PMIA: checkpoint — Gate 2b cleared, entering closure
+            self._broker.send(checkpoint_req(
+                agent_id="AsyncSession",
+                session_id=session_id,
+                phase="GATE_2B",
+                state_summary=(
+                    f"Gate 2b APPROVED. lint=OK pytest=OK. "
+                    f"total_tokens={total_tokens} experts={len(all_expert_results)}."
+                ),
+            ))
 
             # Prune stale worktree refs after all experts finished
             await self._executor.run("worktree_prune")
 
             # PHASE 8 — Session closure
+            # PMIA: final checkpoint before closing (AuditAgent writes to engram/)
+            self._broker.send(checkpoint_req(
+                agent_id="AsyncSession",
+                session_id=session_id,
+                phase="PHASE_8",
+                state_summary=(
+                    f"Session closing: status=completed. "
+                    f"experts={len(all_expert_results)} total_tokens={total_tokens} "
+                    f"warnings={len(warnings)}."
+                ),
+            ))
             self._session_mgr.close(session_id)
             self._log(session_id, "PHASE_8", "session_close", "COMPLETED", 1, 0,
                       {"total_tokens": total_tokens})
@@ -298,6 +342,8 @@ class AsyncSession:
             return _result_for_index
 
         finally:
+            if self._broker:
+                self._broker.close()
             if self._telemetry:
                 if _result_for_index is not None:
                     self._telemetry.write_index_entry(
