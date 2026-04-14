@@ -3,7 +3,7 @@
 > Living reference document. Consolidates every architectural decision, migration mapping,
 > and task status for the v5.0 build. Update STATUS as work progresses.
 >
-> Last updated: 2026-04-13
+> Last updated: 2026-04-14
 > Previous version source: https://github.com/DavidCaastro/factory/tree/agent-configs
 
 ---
@@ -414,36 +414,64 @@ A user who runs `pip install piv-oac` gets both the Python code and all framewor
 
 ```
 sdk/
-├── __init__.py              ← Public API: Session, Agent, Gate, Vault, Engram
-├── cli.py                   ← CLI entry point (piv-oac init --provider=...)
+├── __init__.py              ← Public API: Session class — Session.init(...).run(...)
+├── cli.py                   ← CLI entry point: init, validate, run, run-async, lint,
+│                               test, observe, trigger
 │
 ├── core/
-│   ├── loader.py            ← Reads agents/*.md, contracts/*.md, skills/*.md at runtime
+│   ├── loader.py            ← FrameworkLoader: reads agents/*.md + contracts/*.md at runtime
 │   ├── session.py           ← SessionManager: reads/writes .piv/, checkpoint protocol
-│   └── dag.py               ← DAGBuilder, DAGNode (deterministic, no LLM)
+│   ├── session_async.py     ← AsyncSession: asyncio.gather() parallel PHASE 5
+│   │                           ProviderRouter wired — complexity level → tier
+│   ├── dag.py               ← DAGBuilder, DAGNode, Kahn topological sort (Tier 1)
+│   ├── init.py              ← Initializer: CASE A (new) / CASE B (resume) bootstrap
+│   ├── interview.py         ← InterviewHandler ABC + Console/Callback/PreSupplied modes
+│   └── spec_writer.py       ← SpecWriter: answers → specs/active/ (PHASE 0.2)
 │
 ├── providers/
-│   ├── base.py              ← BaseProvider (abstract interface)
-│   ├── anthropic.py         ← Anthropic implementation (API Key from env/Vault)
-│   ├── openai.py            ← OpenAI implementation (API Key from env/Vault)
-│   └── ollama.py            ← Ollama implementation (local host init)
+│   ├── base.py              ← BaseProvider ABC, ProviderRequest, ProviderResponse
+│   ├── router.py            ← ProviderRouter: resolve_tier(agent_level) + get_provider()
+│   │                           _COMPLEXITY_TO_AGENT_LEVEL: {1: "L2", 2: "L1"}
+│   ├── anthropic.py         ← AnthropicProvider (sync, Tier 3)
+│   ├── anthropic_async.py   ← AsyncAnthropicProvider (async, Tier 3)
+│   ├── openai.py            ← OpenAIProvider (sync, Tier 3)
+│   └── ollama.py / ollama_async.py  ← Ollama sync + async (Tier 2, TCP probe)
 │
 ├── vault/
-│   └── vault.py             ← Vault.scanForInjection(), Vault.verify() — compiled regex
+│   └── vault.py             ← Vault.scan_for_injection(), Vault.get_credential() — Tier 1
 │
 ├── gates/
-│   └── evaluator.py         ← GateEvaluator.evaluate(gate, context) — deterministic
+│   └── evaluator.py         ← GateEvaluator: invariant checks + circuit breaker — Tier 1
 │
 ├── engram/
-│   └── reader.py            ← EngramReader (read-only for all agents except AuditAgent)
+│   └── reader.py            ← EngramReader: read-only, role-scoped access
 │
 ├── metrics/
-│   └── collector.py         ← MetricsCollector.record() — writes metrics/logs_scores/
+│   └── collector.py         ← TelemetryLogger (flush-after-write, OTEL secondary)
+│                               write_index_entry() → logs/index.jsonl (cross-session)
+│                               MetricsCollector façade for EvaluationAgent scoring
+│
+├── tools/
+│   ├── __init__.py          ← Exports: SafeLocalExecutor, ExecutionResult,
+│   │                           BlockedByToolError, ExecutionDataFilter, FilteredArg
+│   ├── executor.py          ← SafeLocalExecutor: allowlist-only subprocess (no shell=True)
+│   │                           ALLOWED_COMMANDS → sys/bootstrap.sh + pytest
+│   │                           60s timeout, 32KB output cap, BlockedByToolError for Gate 2b
+│   └── filter.py            ← ExecutionDataFilter: compiled regex blocks credentials,
+│                               shell metacharacters, path traversal, API keys
+│
+├── triggers/
+│   ├── github.py            ← run_from_github_event(): reads GITHUB_EVENT_PATH,
+│   │                           extracts ```piv block objective + ```piv-answers YAML,
+│   │                           calls AsyncSession, posts result comment via gh CLI
+│   └── webhook.py           ← start_webhook_server(): HTTP POST /session + GET /health
+│                               HMAC-SHA256 validation, fire-and-forget daemon thread
 │
 └── utils/
-    ├── sha256.py            ← SHA256Verifier.verify(file, expected) — no LLM
-    ├── complexity.py        ← ComplexityClassifier.classify(task) — heuristic only
-    └── injection.py         ← InjectionScanner.scan(text) — compiled regex only
+    ├── sha256.py            ← SHA256Verifier.verify() — Tier 1
+    ├── complexity.py        ← ComplexityClassifier.classify() → ClassificationResult
+    │                           Level 1 (fast-track) / Level 2 (interview required)
+    └── injection.py         ← InjectionScanner.scan() — compiled regex, Tier 1
 ```
 
 ### How sdk/ Reads Module Markdowns
@@ -495,8 +523,10 @@ piv-oac = "sdk.cli:main"
 
 - `sdk/utils/` has zero internal imports from other sdk submodules
 - `sdk/vault/` imports only from `sdk/utils/`
+- `sdk/tools/` imports only from `sdk/tools/filter.py` (no LLM, no core imports)
 - `sdk/providers/` imports only from `sdk/providers/base.py` — no core/ imports
-- No LLM call inside `sdk/` — all SDK code is deterministic
+- All LLM calls are in `sdk/providers/` only — all other sdk code is deterministic
+- Every LLM call is preceded by `Vault.scan_for_injection()` — enforced in session layer
 - No credentials hardcoded anywhere in `sdk/`
 
 ---
@@ -520,6 +550,9 @@ root/
 ├── git/           ← Git directives: topology, branch protection, naming policy
 ├── .github/       ← GitHub Actions yml (required path by GitHub)
 │   └── workflows/
+│       ├── piv-session.yml    ← triggers on issues.labeled piv:run →
+│       │                          check-label → orchestration (PHASE 0–2) →
+│       │                          phase-5-experts matrix (parallel) → gate-1-coherence
 │       ├── gate2b.yml
 │       ├── pre-merge.yml
 │       └── staging-gate.yml
@@ -777,6 +810,17 @@ Is operation mechanical + local_model set?  → Tier 2, local model
 Requires genuine reasoning?                 → Tier 3, cloud provider
 ```
 
+**Complexity → agent_level → tier** (wired in `sdk/core/session_async.py`):
+
+```python
+_COMPLEXITY_TO_AGENT_LEVEL = {1: "L2", 2: "L1"}
+# Level 1 micro-task  → L2 → Tier 2 if Ollama available, else Tier 3
+# Level 2 architectural → L1 → Tier 3 always (cloud required for reasoning)
+```
+
+`ComplexityClassifier.classify(objective)` runs at PHASE 0 (Tier 1, no LLM).
+The result propagates to every DAG node — each specialist is routed individually.
+
 ### Tier Assignment per Agent Level
 
 | Agent level | Default tier | With local_model |
@@ -826,8 +870,14 @@ This is synchronous, low-cost, and works with no external dependencies.
 
 ```
 logs/
+├── index.jsonl                ← cross-session historical index (one line per session)
+│                                 fields: session_id, objective, status, complexity_level,
+│                                 fast_track, provider, total_tokens, duration_ms,
+│                                 expert_count, gate_verdicts, warning_count
+│                                 written by TelemetryLogger.write_index_entry() at close
+│                                 queryable: jq 'select(.status=="failed")' logs/index.jsonl
 ├── sessions/
-│   └── <session-id>.jsonl     ← one JSON line per event
+│   └── <session-id>.jsonl     ← one JSON line per event (full event trace per session)
 ├── gates/
 │   └── <session-id>.jsonl     ← gate verdicts with rationale
 └── scores/
@@ -1775,6 +1825,14 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `_context_.md` structured (v5) | 2026-04-13 | 80-item build plan, sections 8-12 added, all structural issues resolved |
 | `_context_.md` structural + architectural corrections | 2026-04-13 | Section numbering fixed, FASE→PHASE, skill migration corrected, interview protocol adaptive, engram lazy load, TelemetryLogger defined, agent _log block, gate invariants in _base.md |
 | `_init_.md` rewritten (v5.0) | 2026-04-13 | 8 sections, English only, non-operational. Covers identity, problem space, differentiators, layer map, module map, core principles, version history. |
+| `sdk/core/session_async.py` — AsyncSession + parallel PHASE 5 | 2026-04-14 | asyncio.gather() per DAG batch. AsyncAnthropicProvider + AsyncOllamaProvider. ExpertResult + AsyncSessionResult dataclasses. Circuit breaker: 3 failures → status="circuit_breaker". |
+| `sdk/triggers/github.py` + `sdk/triggers/webhook.py` | 2026-04-14 | GitHub: reads GITHUB_EVENT_PATH, extracts ```piv objective + ```piv-answers YAML, calls AsyncSession, posts comment via gh CLI. Webhook: HTTP POST /session, HMAC-SHA256, fire-and-forget daemon thread. |
+| `.github/workflows/piv-session.yml` | 2026-04-14 | Triggers on issues.labeled piv:run. Jobs: check-label → orchestration (PHASE 0–2) → phase-5-experts matrix (fail-fast: false, parallel CI) → gate-1-coherence. |
+| `config/settings.yaml` | 2026-04-14 | max_parallel_experts: 6, circuit_breaker_threshold: 3, trigger.mode: manual/github_issues/webhook, activation_label: piv:run. |
+| `sdk/tools/` subpackage | 2026-04-14 | SafeLocalExecutor: allowlist-only subprocess (no shell=True), 60s timeout, 32KB cap. ExecutionDataFilter: blocks shell metacharacters, path traversal, API keys, credential patterns. BlockedByToolError for Gate 2b failures. |
+| SafeLocalExecutor wired into AsyncSession | 2026-04-14 | worktree_add before each specialist LLM call, worktree_remove in success + error paths. Gate 2b: run_lint + run_pytest block closure — raises BlockedByToolError if either fails. worktree_prune after all experts. |
+| ProviderRouter wired to ComplexityClassifier | 2026-04-14 | Fixed: agent_level was hardcoded "L2". Now: complexity.level → _COMPLEXITY_TO_AGENT_LEVEL → ProviderRouter.resolve_tier() + get_provider(). classification propagated to every DAG node. |
+| `logs/index.jsonl` — cross-session historical index | 2026-04-14 | TelemetryLogger.write_index_entry() appends one summary line per session at close. Captures: session_id, objective, status, complexity_level, tokens, duration, gate_verdicts. Written at all exit points (completed, circuit_breaker, Gate 2b failure). |
 
 ### Next (ordered by priority)
 
@@ -1802,3 +1860,11 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ~~20~~ | ~~Create `metrics/schema.md`~~ | ~~P3~~ | DONE |
 | ~~21~~ | ~~Create `specs/_templates/`~~ | ~~P3~~ | DONE |
 | ~~22~~ | ~~Define `tests/` structure~~ | ~~P3~~ | DONE |
+| ~~23~~ | ~~`sdk/core/session_async.py` + async providers~~ | ~~P2~~ | DONE |
+| ~~24~~ | ~~`sdk/triggers/` (github.py + webhook.py)~~ | ~~P2~~ | DONE |
+| ~~25~~ | ~~`.github/workflows/piv-session.yml`~~ | ~~P2~~ | DONE |
+| ~~26~~ | ~~`sdk/tools/` (SafeLocalExecutor + ExecutionDataFilter)~~ | ~~P2~~ | DONE |
+| ~~27~~ | ~~Wire SafeLocalExecutor into AsyncSession (Gate 2b + worktree lifecycle)~~ | ~~P2~~ | DONE |
+| ~~28~~ | ~~Wire ProviderRouter to ComplexityClassifier output~~ | ~~P2~~ | DONE |
+| ~~29~~ | ~~`logs/index.jsonl` cross-session historical index~~ | ~~P2~~ | DONE |
+| 30 | Compute SHA-256 hashes for all 21 `skills/manifest.json` entries | P3 | PENDING |
