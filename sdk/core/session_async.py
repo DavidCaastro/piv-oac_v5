@@ -30,9 +30,15 @@ from sdk.core.session import CheckpointType, SessionManager
 from sdk.gates.evaluator import GateContext, GateEvaluator, GateType, GateVerdict
 from sdk.metrics import TelemetryLogger
 from sdk.providers.base import ProviderRequest, ProviderResponse
+from sdk.providers.router import ProviderRouter
 from sdk.tools import BlockedByToolError, SafeLocalExecutor
-from sdk.utils.complexity import ComplexityClassifier
+from sdk.utils.complexity import ClassificationResult, ComplexityClassifier
 from sdk.vault import Vault
+
+# Complexity level → agent level for provider routing:
+#   Level 1 (micro-task)     → L2  — mechanical, can run on local Ollama (Tier 2)
+#   Level 2 (architectural)  → L1  — requires genuine reasoning, cloud only (Tier 3)
+_COMPLEXITY_TO_AGENT_LEVEL: dict[int, str] = {1: "L2", 2: "L1"}
 
 
 @dataclass
@@ -88,6 +94,7 @@ class AsyncSession:
         self._telemetry: TelemetryLogger | None = None
         self._gate_eval = GateEvaluator()
         self._executor = SafeLocalExecutor(project_root=self._repo_root)
+        self._router: ProviderRouter | None = None  # built after providers bootstrap
 
     @classmethod
     def init(
@@ -120,7 +127,7 @@ class AsyncSession:
             AsyncSessionResult with all expert outputs and gate verdicts.
         """
         start_ms = _now_ms()
-        self._bootstrap_providers()
+        self._bootstrap_providers()  # also builds self._router
 
         # PHASE 0 — Injection scan (Tier 1)
         Vault.scan_for_injection(objective)
@@ -169,7 +176,7 @@ class AsyncSession:
 
                 # All ready nodes run concurrently
                 expert_tasks = [
-                    self._run_specialist(session_id, node, consecutive_rejections)
+                    self._run_specialist(session_id, node, classification)
                     for node in ready
                 ]
 
@@ -253,16 +260,32 @@ class AsyncSession:
         self,
         session_id: str,
         node: DAGNode,
-        consecutive_rejections: int,
+        classification: ClassificationResult,
     ) -> ExpertResult:
         """Run a single SpecialistAgent as an async LLM call.
 
         Each expert is fully independent — system prompt comes from the
         agent's markdown files; task context from its spec section.
+        Provider/model is chosen by ProviderRouter based on complexity level:
+          Level 1 → agent_level L2 → Tier 2 (Ollama) if available, else Tier 3
+          Level 2 → agent_level L1 → Tier 3 always (cloud, genuine reasoning required)
         """
         start_ms = _now_ms()
         expert_id = f"SpecialistAgent-{session_id[:8]}-{node.node_id}"
         wt_name   = f"{session_id[:8]}-{node.node_id}"
+
+        # Route provider via ProviderRouter — complexity drives agent_level
+        agent_level = _COMPLEXITY_TO_AGENT_LEVEL.get(classification.level, "L1")
+        tier        = self._router.resolve_tier(agent_level)
+        provider    = self._router.get_provider(tier)
+
+        self._log(session_id, "PHASE_5", "provider_routed", "OK", tier.value, 0, {
+            "node_id":      node.node_id,
+            "complexity":   classification.level,
+            "agent_level":  agent_level,
+            "tier":         tier.name,
+            "provider":     type(provider).__name__ if provider else "none",
+        })
 
         # Worktree creation (Tier 1 — SafeLocalExecutor, non-fatal on failure)
         wt_result = await self._executor.run("worktree_add", [wt_name, expert_id])
@@ -294,7 +317,6 @@ class AsyncSession:
                 }
             ]
 
-            provider = self._select_provider(agent_level="L2")
             request = ProviderRequest(
                 messages=messages,
                 model=provider.model if hasattr(provider, "model") else "",
@@ -338,13 +360,11 @@ class AsyncSession:
     # ------------------------------------------------------------------
 
     def _bootstrap_providers(self) -> None:
+        """Initialise async provider instances and wire ProviderRouter."""
         from sdk.providers.anthropic_async import AsyncAnthropicProvider
         from sdk.providers.ollama_async import AsyncOllamaProvider
 
-        if self._provider_name == "anthropic":
-            self._cloud = AsyncAnthropicProvider(model=self._model or "claude-sonnet-4-6")
-        elif self._provider_name == "openai":
-            # OpenAI async provider — same pattern as Anthropic
+        if self._provider_name in ("anthropic", "openai"):
             self._cloud = AsyncAnthropicProvider(model=self._model or "claude-sonnet-4-6")
         elif self._provider_name == "ollama":
             self._local = AsyncOllamaProvider(model=self._model or "llama3.2:3b")
@@ -352,11 +372,12 @@ class AsyncSession:
         if self._local_model:
             self._local = AsyncOllamaProvider(model=self._local_model)
 
-    def _select_provider(self, agent_level: str):
-        """Return async provider for agent_level, with Tier 2 fallback."""
-        if agent_level in ("L1.5", "L2") and self._local and self._local.is_available():
-            return self._local
-        return self._cloud
+        # ProviderRouter owns all tier/level routing decisions going forward.
+        # It checks is_available() internally for Tier 2 fallback.
+        self._router = ProviderRouter(
+            cloud_provider=self._cloud,
+            local_provider=self._local,
+        )
 
     def _build_stub_dag(self, objective: str, level: int) -> DAG:
         """Build a minimal single-node DAG when no explicit DAG is provided."""
