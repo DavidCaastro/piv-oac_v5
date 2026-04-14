@@ -1,0 +1,174 @@
+"""sdk/triggers/github.py — GitHub trigger: issue/PR → PIV/OAC session.
+
+Parses GitHub webhook payloads and fires AsyncSession.run_async().
+Called by .github/workflows/piv-session.yml via `piv trigger github`.
+
+Supported events:
+  - issues.labeled       (label: piv:run) → new session from issue body
+  - issue_comment.created (if issue has piv:run label) → append context
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+from sdk.core.session_async import AsyncSession, AsyncSessionResult
+
+
+class GitHubTriggerError(Exception):
+    pass
+
+
+def _load_event() -> dict[str, Any]:
+    """Read GitHub Actions event payload from GITHUB_EVENT_PATH env var."""
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not event_path or not Path(event_path).exists():
+        raise GitHubTriggerError(
+            "GITHUB_EVENT_PATH not set or file missing. "
+            "This trigger must run inside a GitHub Actions workflow."
+        )
+    return json.loads(Path(event_path).read_text(encoding="utf-8"))
+
+
+def _extract_objective(event: dict[str, Any], event_name: str) -> str:
+    """Extract the PIV/OAC objective from the event payload.
+
+    Supported formats:
+      - Issue body as-is (plain text objective)
+      - Issue body with ```piv ... ``` fenced block (structured)
+    """
+    if event_name == "issues":
+        body = event.get("issue", {}).get("body", "")
+    elif event_name == "pull_request":
+        body = event.get("pull_request", {}).get("body", "")
+    else:
+        raise GitHubTriggerError(f"Unsupported event type: {event_name}")
+
+    if not body:
+        raise GitHubTriggerError("Issue/PR body is empty — no objective to extract.")
+
+    # Look for structured ```piv ... ``` block first
+    import re
+    match = re.search(r"```piv\s*\n(.*?)```", body, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+
+    # Fall back to full body as objective
+    return body.strip()
+
+
+def _extract_answers(event: dict[str, Any]) -> dict | None:
+    """Extract pre-supplied answers from issue body if present.
+
+    Format:
+      ```piv-answers
+      protected_endpoints: ["/api/users"]
+      refresh_tokens: true
+      ```
+    """
+    body = (
+        event.get("issue", {}).get("body", "")
+        or event.get("pull_request", {}).get("body", "")
+    )
+
+    import re
+    import yaml
+
+    match = re.search(r"```piv-answers\s*\n(.*?)```", body, re.DOTALL)
+    if match:
+        try:
+            return yaml.safe_load(match.group(1))
+        except Exception:
+            return None
+    return None
+
+
+def _get_provider() -> tuple[str, str | None]:
+    """Determine provider from env vars (set via GitHub Secrets)."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "anthropic", None
+    if os.environ.get("OPENAI_API_KEY"):
+        return "openai", None
+    if os.environ.get("OLLAMA_HOST"):
+        return "ollama", os.environ.get("OLLAMA_MODEL", "llama3.2:3b")
+    raise GitHubTriggerError(
+        "No provider credential found. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, "
+        "or OLLAMA_HOST in GitHub Secrets."
+    )
+
+
+async def run_from_github_event(repo_root: Path | None = None) -> AsyncSessionResult:
+    """Main entry point: parse GitHub event → run PIV/OAC session.
+
+    Called by `piv trigger github` from .github/workflows/piv-session.yml.
+    """
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "issues")
+    event = _load_event()
+
+    objective = _extract_objective(event, event_name)
+    answers = _extract_answers(event)
+    provider, local_model = _get_provider()
+
+    session = AsyncSession.init(
+        provider=provider,
+        local_model=local_model,
+        repo_root=repo_root or Path.cwd(),
+    )
+
+    result = await session.run_async(objective=objective, answers=answers)
+    return result
+
+
+def post_result_comment(result: AsyncSessionResult) -> None:
+    """Post a summary comment to the GitHub issue via gh CLI.
+
+    Requires: gh CLI installed and authenticated (GITHUB_TOKEN in env).
+    """
+    import subprocess
+
+    issue_number = os.environ.get("GITHUB_ISSUE_NUMBER", "")
+    if not issue_number:
+        return  # Not an issue trigger — skip
+
+    status_emoji = "✅" if result.status == "completed" else "❌"
+    expert_lines = "\n".join(
+        f"  - `{r.expert_id}` → {'✅' if r.success else '❌'} "
+        f"({r.tokens_used} tokens, {r.duration_ms}ms)"
+        for r in result.expert_results
+    )
+
+    body = (
+        f"## PIV/OAC Session — {status_emoji} `{result.status.upper()}`\n\n"
+        f"**Session ID:** `{result.session_id}`\n"
+        f"**Total tokens:** {result.total_tokens:,}\n"
+        f"**Duration:** {result.duration_ms:,}ms\n\n"
+        f"### Experts\n{expert_lines or '_No experts ran_'}\n\n"
+        + (f"### Warnings\n" + "\n".join(f"- {w}" for w in result.warnings) + "\n\n"
+           if result.warnings else "")
+        + "_Generated by PIV/OAC v5.0_"
+    )
+
+    subprocess.run(
+        ["gh", "issue", "comment", issue_number, "--body", body],
+        check=False,  # Non-fatal — session result is independent of comment
+    )
+
+
+def main() -> None:
+    """Entry point for `piv trigger github` CLI command."""
+    result = asyncio.run(run_from_github_event())
+
+    # Print summary to stdout (captured by GitHub Actions logs)
+    print(f"[piv] session={result.session_id} status={result.status} "
+          f"tokens={result.total_tokens} duration={result.duration_ms}ms")
+
+    # Post comment to issue (non-fatal if it fails)
+    post_result_comment(result)
+
+    # Exit code: 0=success, 1=failed/circuit_breaker
+    import sys
+    sys.exit(0 if result.status == "completed" else 1)

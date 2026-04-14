@@ -111,6 +111,57 @@ def cmd_observe(args: argparse.Namespace, repo: Path) -> int:
     return _run_bootstrap(f"observe:{subcmd}", repo)
 
 
+def cmd_trigger(args: argparse.Namespace, repo: Path) -> int:
+    """piv trigger github|webhook — external trigger integrations."""
+    subcmd = getattr(args, "subcmd", "github")
+
+    if subcmd == "github":
+        from sdk.triggers.github import main as github_main
+        github_main()
+        return 0
+
+    if subcmd == "webhook":
+        port = getattr(args, "port", 8765)
+        from sdk.triggers.webhook import start_webhook_server
+        start_webhook_server(port=port, repo_root=repo)
+        return 0
+
+    print(f"[piv] Unknown trigger: {subcmd}", file=sys.stderr)
+    return 1
+
+
+def cmd_run_async(args: argparse.Namespace, repo: Path) -> int:
+    """piv run-async — start a session with true parallel PHASE 5."""
+    import asyncio
+    from sdk.core.session_async import AsyncSession
+
+    provider    = getattr(args, "provider", "anthropic")
+    objective   = getattr(args, "objective", "")
+    local_model = getattr(args, "local_model", None)
+
+    if not objective:
+        print("[piv] Error: --objective is required", file=sys.stderr)
+        return 1
+
+    result = asyncio.run(
+        AsyncSession.init(provider=provider, local_model=local_model, repo_root=repo)
+        .run_async(objective=objective)
+    )
+
+    print(f"[piv] session={result.session_id} status={result.status} "
+          f"tokens={result.total_tokens} duration={result.duration_ms}ms")
+
+    for r in result.expert_results:
+        status = "✓" if r.success else "✗"
+        print(f"  {status} {r.expert_id}: {r.tokens_used} tokens, {r.duration_ms}ms")
+
+    if result.warnings:
+        for w in result.warnings:
+            print(f"  ! {w}")
+
+    return 0 if result.status == "completed" else 1
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -148,6 +199,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_obs = sub.add_parser("observe", help="Manage Grafana observability stack")
     p_obs.add_argument("subcmd", choices=["start", "stop", "logs"])
 
+    # run-async (parallel PHASE 5)
+    p_run_async = sub.add_parser("run-async", help="Start async session (parallel PHASE 5)")
+    p_run_async.add_argument("--provider", default="anthropic",
+                             choices=["anthropic", "openai", "ollama"])
+    p_run_async.add_argument("--objective", required=True, help="Session objective")
+    p_run_async.add_argument("--local-model", dest="local_model", default=None,
+                             help="Ollama model for Tier 2")
+
+    # trigger
+    p_trigger = sub.add_parser("trigger", help="External trigger integrations")
+    p_trigger.add_argument("subcmd", choices=["github", "webhook"])
+    p_trigger.add_argument("--port", type=int, default=8765,
+                           help="Port for webhook server (default: 8765)")
+
     return parser
 
 
@@ -160,11 +225,13 @@ def main() -> None:
         "init":      cmd_init,
         "validate":  cmd_validate,
         "run":       cmd_run,
+        "run-async": cmd_run_async,
         "lint":      cmd_lint,
         "test":      cmd_test,
         "test:unit": cmd_test_unit,
         "test:int":  cmd_test_int,
         "observe":   cmd_observe,
+        "trigger":   cmd_trigger,
     }
 
     handler = dispatch.get(args.command)

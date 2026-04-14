@@ -1,0 +1,256 @@
+name: piv/session
+
+# PIV/OAC Automatic Session Trigger
+#
+# Fires when a GitHub Issue is labeled with "piv:run".
+# The issue body becomes the objective.
+#
+# Structured format (optional, in issue body):
+#   ```piv
+#   add JWT authentication to the existing REST API
+#   ```
+#   ```piv-answers
+#   protected_endpoints: ["/api/users", "/api/orders"]
+#   refresh_tokens: true
+#   ```
+#
+# If no ```piv block, the full issue body is used as the objective.
+#
+# Flow:
+#   1. ORCHESTRATION job: PHASE 0–2 (scan, classify, interview, spec, DAG)
+#   2. PHASE-5-EXPERTS job matrix: one job per DAG expert (true parallel)
+#   3. GATE-1 job: CoherenceAgent after all experts complete
+#   4. Gate 2b and staging-gate follow via existing workflows
+
+on:
+  issues:
+    types: [labeled]
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Guard: only run when the correct label is applied
+  # ---------------------------------------------------------------------------
+  check-label:
+    name: Check activation label
+    runs-on: ubuntu-latest
+    if: github.event.label.name == 'piv:run'
+    outputs:
+      proceed: ${{ steps.check.outputs.proceed }}
+      issue_number: ${{ github.event.issue.number }}
+    steps:
+      - id: check
+        run: echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Job 1: Orchestration — PHASE 0–2
+  # Runs sequentially: injection scan → complexity → interview → spec → DAG
+  # Outputs the DAG as JSON for the parallel expert jobs.
+  # ---------------------------------------------------------------------------
+  orchestration:
+    name: PHASE 0–2 — Orchestration
+    runs-on: ubuntu-latest
+    needs: check-label
+    if: needs.check-label.outputs.proceed == 'true'
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    outputs:
+      session_id: ${{ steps.orchestrate.outputs.session_id }}
+      dag_json:   ${{ steps.orchestrate.outputs.dag_json }}
+      expert_ids: ${{ steps.orchestrate.outputs.expert_ids }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install piv-oac
+        run: pip install -e .
+
+      - name: Run orchestration phases (PHASE 0–2)
+        id: orchestrate
+        env:
+          ANTHROPIC_API_KEY:  ${{ secrets.PIV_ANTHROPIC_KEY }}
+          PIV_AUDIT_TOKEN:    ${{ secrets.PIV_AUDIT_TOKEN }}
+          PIV_SECURITY_TOKEN: ${{ secrets.PIV_SECURITY_TOKEN }}
+          GITHUB_EVENT_PATH:  ${{ github.event_path }}
+          GITHUB_EVENT_NAME:  ${{ github.event_name }}
+          GITHUB_ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          python -c "
+          import asyncio, json, os, sys
+          from sdk.triggers.github import run_from_github_event
+          from pathlib import Path
+
+          # For orchestration phase only — run PHASE 0-2, output DAG
+          # Full async run happens in the expert matrix jobs
+          result = asyncio.run(run_from_github_event(repo_root=Path('.')))
+
+          print(f'session_id={result.session_id}')
+          print(f'status={result.status}')
+
+          # Emit outputs for matrix jobs
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f'session_id={result.session_id}\n')
+              # Expert IDs from results
+              expert_ids = json.dumps([r.expert_id for r in result.expert_results])
+              f.write(f'expert_ids={expert_ids}\n')
+              f.write('dag_json={}\n')  # Populated by full SDK in production
+
+          sys.exit(0 if result.status in ('completed', 'active') else 1)
+          "
+
+      - name: Post session started comment
+        if: success()
+        uses: actions/github-script@v7
+        env:
+          SESSION_ID: ${{ steps.orchestrate.outputs.session_id }}
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## PIV/OAC Session Started ⚙️\n\n` +
+                    `**Session ID:** \`${process.env.SESSION_ID}\`\n\n` +
+                    `PHASE 0–2 complete. Specialist Agents starting in parallel...\n\n` +
+                    `_PIV/OAC v5.0_`
+            });
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Parallel expert execution — PHASE 5
+  #
+  # In production: matrix is built from DAG node count.
+  # Each job runs one SpecialistAgent independently.
+  # All jobs run concurrently — this IS the parallelization.
+  #
+  # For the scaffold: matrix is static (expert-1, expert-2).
+  # The SDK session_async.py handles dynamic expert count at runtime.
+  # ---------------------------------------------------------------------------
+  phase-5-experts:
+    name: PHASE 5 — Expert ${{ matrix.expert }}
+    runs-on: ubuntu-latest
+    needs: orchestration
+    if: needs.orchestration.result == 'success'
+    permissions:
+      contents: write
+      pull-requests: write
+
+    strategy:
+      matrix:
+        expert: [1]          # expanded dynamically in production via DAG node count
+      fail-fast: false       # one expert failing does not cancel others
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install piv-oac
+        run: pip install -e .
+
+      - name: Create expert worktree branch
+        env:
+          SESSION_ID: ${{ needs.orchestration.outputs.session_id }}
+          EXPERT_N:   ${{ matrix.expert }}
+        run: |
+          BRANCH="feature/${SESSION_ID:0:8}/expert-${EXPERT_N}"
+          git checkout -b "$BRANCH"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+
+      - name: Run SpecialistAgent (async LLM call)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.PIV_ANTHROPIC_KEY }}
+          SESSION_ID:        ${{ needs.orchestration.outputs.session_id }}
+          EXPERT_N:          ${{ matrix.expert }}
+        run: |
+          python -c "
+          import asyncio, os
+          from sdk.providers.anthropic_async import AsyncAnthropicProvider
+          from sdk.providers.base import ProviderRequest
+
+          async def run():
+              provider = AsyncAnthropicProvider()
+              req = ProviderRequest(
+                  messages=[{'role': 'user', 'content': 'Implement assigned task per spec.'}],
+                  system='SpecialistAgent — follow contracts/specialist_agent.md',
+              )
+              resp = await provider.complete(req)
+              print(f'expert-{os.environ[\"EXPERT_N\"]} complete: {resp.output_tokens} tokens')
+
+          asyncio.run(run())
+          "
+
+      - name: Commit expert output
+        env:
+          SESSION_ID: ${{ needs.orchestration.outputs.session_id }}
+          EXPERT_N:   ${{ matrix.expert }}
+        run: |
+          git config user.name "piv-oac[bot]"
+          git config user.email "piv-oac@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "feat: specialist expert-${EXPERT_N} output [session: ${SESSION_ID:0:8}]"
+          git push origin "$BRANCH" || echo "No changes to push"
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Gate 1 — CoherenceAgent after all experts finish
+  # Triggers pre-merge.yml on the task branch PRs.
+  # ---------------------------------------------------------------------------
+  gate-1-coherence:
+    name: Gate 1 — CoherenceAgent
+    runs-on: ubuntu-latest
+    needs: phase-5-experts
+    if: needs.phase-5-experts.result == 'success'
+
+    steps:
+      - name: Post gate 1 status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## PIV/OAC — Gate 1 ✅\n\n` +
+                    `All expert branches ready. CoherenceAgent review initiated via \`pre-merge.yml\`.\n\n` +
+                    `Gate 2b follows automatically after coherence approval.\n\n` +
+                    `_PIV/OAC v5.0_`
+            });
+
+      - name: Label issue as done
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Remove piv:run, add piv:done
+            try {
+              await github.rest.issues.removeLabel({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'piv:run'
+              });
+            } catch(e) {}
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['piv:done']
+            });

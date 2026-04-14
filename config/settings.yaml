@@ -1,0 +1,95 @@
+# config/settings.yaml — PIV/OAC v5.0 Runtime Configuration
+#
+# Human-edited static configuration. Never written by agents at runtime.
+# Read by: LogisticsAgent, sdk/core/session_async.py, sdk/triggers/
+#
+# All values here are defaults. Override per-project by copying this file
+# to the user's repo root and editing as needed.
+
+# ---------------------------------------------------------------------------
+# Session behavior
+# ---------------------------------------------------------------------------
+session:
+  # Maximum concurrent SpecialistAgents per session (PHASE 5 parallelism)
+  max_parallel_experts: 6
+
+  # Gate 0 time budget in seconds (Level 1 fast-track)
+  gate0_budget_seconds: 60
+
+  # Circuit breaker threshold (consecutive GATE_VERDICT: REJECTED)
+  circuit_breaker_threshold: 3
+
+  # Context saturation warning level (0.0–1.0)
+  context_saturation_warning: 0.80
+
+# ---------------------------------------------------------------------------
+# Trigger configuration
+# ---------------------------------------------------------------------------
+trigger:
+  # Active trigger mode: "manual" | "github_issues" | "webhook"
+  mode: manual
+
+  github_issues:
+    # Label that activates the framework on a GitHub issue
+    activation_label: "piv:run"
+
+    # Label added when session completes successfully
+    done_label: "piv:done"
+
+    # Label added when session fails or circuit breaker fires
+    failed_label: "piv:failed"
+
+    # Whether to post a comment with the session summary on the issue
+    post_summary_comment: true
+
+  webhook:
+    # Port for the local webhook HTTP server (sdk/triggers/webhook.py)
+    port: 8765
+
+    # Secret for HMAC-SHA256 webhook signature validation (set via env: PIV_WEBHOOK_SECRET)
+    # Never hardcode the value here.
+    secret_env_var: PIV_WEBHOOK_SECRET
+
+# ---------------------------------------------------------------------------
+# Async provider settings
+# ---------------------------------------------------------------------------
+providers:
+  # Timeout in seconds for each async LLM call
+  async_timeout_seconds: 120
+
+  # Maximum retries on transient provider errors
+  max_retries: 2
+
+  # Retry backoff in seconds (exponential: attempt * backoff_base)
+  retry_backoff_base: 2
+
+# ---------------------------------------------------------------------------
+# LogisticsAgent estimation constants
+# ---------------------------------------------------------------------------
+logistics:
+  tokens_per_complexity_point: 800
+  tokens_per_file_read: 300
+  L0_overhead: 2000
+  L1_control_overhead: 1500
+  tokens_per_gate: 400
+  session_budget_warning_threshold: 0.80
+  session_budget_split_threshold: 1.00
+
+# ---------------------------------------------------------------------------
+# ExecutionAuditor
+# ---------------------------------------------------------------------------
+execution_auditor:
+  # Evaluate every N checkpoints (default: 3)
+  monitoring_interval: 3
+
+# ---------------------------------------------------------------------------
+# Observability
+# ---------------------------------------------------------------------------
+observability:
+  # Always write structured logs to logs/ (primary, sync)
+  file_logging: true
+
+  # Fire-and-forget OTEL export (secondary, async — silently skipped if down)
+  otel_enabled: true
+  otel_host: localhost
+  otel_port: 4317
