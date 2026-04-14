@@ -6,7 +6,19 @@
 set -euo pipefail
 
 PIV_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Load .env if present — never committed, holds local secrets and defaults.
+# Variables already in the environment take precedence (set -a exports sourced vars).
+if [ -f "${PIV_ROOT}/.env" ]; then
+  set -a
+  # shellcheck source=/dev/null
+  source "${PIV_ROOT}/.env"
+  set +a
+fi
+
+# Defaults — applied after .env so explicit values win.
 PIV_SESSION_DIR="${PIV_SESSION_DIR:-.piv}"
+PIV_VAULT_PATH="${PIV_VAULT_PATH:-.piv/vault}"
 OLLAMA_HOST="${OLLAMA_HOST:-localhost}"
 
 # ─────────────────────────────────────────────
@@ -57,17 +69,17 @@ cmd_validate() {
     exit_code=1
   fi
 
-  # CHECK 4 — required env vars
+  # CHECK 4 — required env vars (PIV_SESSION_DIR + PIV_VAULT_PATH have defaults)
   local missing=0
-  for var in PIV_PROVIDER PIV_VAULT_PATH; do
+  for var in PIV_PROVIDER; do
     if [ -z "${!var:-}" ]; then
-      fail "CHECK 4  env var $var missing"
+      fail "CHECK 4  env var $var missing (set in .env or export)"
       missing=$((missing + 1))
       exit_code=1
     fi
   done
   if [ "$missing" -eq 0 ]; then
-    pass "CHECK 4  env vars present"
+    pass "CHECK 4  env vars present (PIV_PROVIDER=${PIV_PROVIDER} SESSION_DIR=${PIV_SESSION_DIR} VAULT=${PIV_VAULT_PATH})"
   fi
 
   # CHECK 5 — provider token
@@ -102,16 +114,23 @@ cmd_validate() {
   local versioning="${PIV_ROOT}/engram/VERSIONING.md"
   if [ ! -f "$manifest" ]; then
     warn "CHECK 6  skills/manifest.json not found (build pending)"
-  elif [ ! -f "$versioning" ]; then
-    warn "CHECK 6  engram/VERSIONING.md not found — establishing baseline"
-    sha256sum "$manifest" >> "${PIV_ROOT}/.piv/alerts/manifest_baseline_$(date +%s).log" 2>/dev/null || true
-    pass "CHECK 6  skills manifest SHA-256 (baseline established)"
   else
-    local expected
-    expected=$(grep -A1 "skills-manifest" "$versioning" | tail -1 | awk '{print $1}')
     local actual
     actual=$(sha256sum "$manifest" | awk '{print $1}')
-    if [ "$expected" = "$actual" ]; then
+    # grep exits 1 when entry is absent — || true prevents set -e from aborting
+    local expected
+    expected=$(grep -A1 "skills-manifest" "$versioning" 2>/dev/null | tail -1 | awk '{print $1}' || true)
+    if [ -z "$expected" ]; then
+      # First run or baseline not yet written — establish it now
+      warn "CHECK 6  skills manifest — no baseline yet, establishing now"
+      mkdir -p "${PIV_ROOT}/.piv"
+      {
+        echo ""
+        echo "## skills-manifest"
+        echo "${actual}  skills/manifest.json"
+      } >> "$versioning"
+      pass "CHECK 6  skills manifest SHA-256 (baseline written to VERSIONING.md)"
+    elif [ "$expected" = "$actual" ]; then
       pass "CHECK 6  skills manifest SHA-256"
     else
       fail "CHECK 6  skills manifest hash MISMATCH — possible tampering"
