@@ -29,6 +29,15 @@ from sdk.core.loader import FrameworkLoader
 from sdk.core.session import CheckpointType, SessionManager
 from sdk.gates.evaluator import GateContext, GateEvaluator, GateType, GateVerdict
 from sdk.metrics import TelemetryLogger
+from sdk.pmia import (
+    GateId,
+    PMIABroker,
+    Verdict,
+    checkpoint_req,
+    escalation,
+    gate_verdict,
+)
+from sdk.pmia.messages import EscalationReason
 from sdk.providers.base import ProviderRequest, ProviderResponse
 from sdk.providers.router import ProviderRouter
 from sdk.tools import BlockedByToolError, SafeLocalExecutor
@@ -93,8 +102,9 @@ class AsyncSession:
         self._session_mgr = SessionManager(self._repo_root)
         self._telemetry: TelemetryLogger | None = None
         self._gate_eval = GateEvaluator()
-        self._executor = SafeLocalExecutor(project_root=self._repo_root)
-        self._router: ProviderRouter | None = None  # built after providers bootstrap
+        self._executor  = SafeLocalExecutor(project_root=self._repo_root)
+        self._router:  ProviderRouter | None = None   # built after providers bootstrap
+        self._broker:  PMIABroker | None = None       # built after telemetry init
 
     @classmethod
     def init(
@@ -141,6 +151,9 @@ class AsyncSession:
             session_id=session_id,
             log_dir=self._repo_root / "logs",
         )
+        # PMIABroker requires telemetry to be ready (logs every message before processing)
+        self._broker = PMIABroker(session_id=session_id, telemetry_logger=self._telemetry)
+
         self._log(session_id, "PHASE_0", "session_start", "OK", 1, 0, {
             "complexity_level": classification.level,
             "fast_track": classification.fast_track,
@@ -200,6 +213,13 @@ class AsyncSession:
                         warnings.append(f"Expert {result.expert_id} failed: {result.error}")
 
                         if consecutive_rejections >= GateEvaluator.CIRCUIT_BREAKER_THRESHOLD:
+                            # PMIA: escalate circuit breaker via broker
+                            self._broker.send(escalation(
+                                agent_id="AsyncSession",
+                                session_id=session_id,
+                                reason=EscalationReason.UNRESOLVABLE_CONFLICT,
+                                context=f"Circuit breaker: {consecutive_rejections} consecutive failures",
+                            ))
                             self._session_mgr.close(session_id, status="failed")  # type: ignore
                             _result_for_index = AsyncSessionResult(
                                 session_id=session_id,
@@ -226,6 +246,14 @@ class AsyncSession:
 
             if not lint_result.success or not pytest_result.success:
                 failed_tool = lint_result if not lint_result.success else pytest_result
+                # PMIA: Gate 2b BLOCKED_BY_TOOL verdict via broker
+                self._broker.send(gate_verdict(
+                    agent_id="StandardsAgent",
+                    session_id=session_id,
+                    gate=GateId.GATE_2B,
+                    verdict=Verdict.BLOCKED_BY_TOOL,
+                    rationale=f"{failed_tool.command} exit={failed_tool.returncode}",
+                ))
                 self._session_mgr.close(session_id, status="failed")  # type: ignore
                 _result_for_index = AsyncSessionResult(
                     session_id=session_id,
@@ -239,6 +267,14 @@ class AsyncSession:
                 )
                 raise BlockedByToolError(failed_tool.to_agent_summary())
 
+            # PMIA: Gate 2b APPROVED verdict via broker
+            self._broker.send(gate_verdict(
+                agent_id="StandardsAgent",
+                session_id=session_id,
+                gate=GateId.GATE_2B,
+                verdict=Verdict.APPROVED,
+                rationale="lint and pytest passed",
+            ))
             gate_verdicts["GATE_2B"] = "APPROVED"
 
             # Prune stale worktree refs after all experts finished

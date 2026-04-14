@@ -1,11 +1,74 @@
-"""sdk/core/loader.py — FrameworkLoader: reads agents/, contracts/, skills/ at runtime."""
+"""sdk/core/loader.py — FrameworkLoader: reads agents/, contracts/, skills/ at runtime.
+
+Load authorization per sys/_index.md §Load Table by Role.
+Every load_agent_for_role() call is checked against the role's authorized list.
+Violations are logged — ExecutionAuditor monitors for them.
+"""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from sdk.utils.sha256 import SHA256Verifier
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Role-based load authorization table
+# Mirrors sys/_index.md §Load Table by Role exactly.
+# Keys: requesting role. Values: set of agent names that role may load.
+# ---------------------------------------------------------------------------
+
+_AUTHORIZED_LOADS: dict[str, set[str]] = {
+    "orchestrator": {
+        "orchestrator",
+    },
+    "security_agent": {
+        "security_agent",
+    },
+    "audit_agent": {
+        "audit_agent",
+    },
+    "coherence_agent": {
+        "coherence_agent",
+    },
+    "compliance_agent": {
+        "compliance_agent",
+    },
+    "evaluation_agent": {
+        "evaluation_agent",
+    },
+    "standards_agent": {
+        "standards_agent",
+    },
+    "documentation_agent": {
+        "documentation_agent",
+    },
+    "research_orchestrator": {
+        "research_orchestrator",
+    },
+    "logistics_agent": {
+        "logistics_agent",
+    },
+    "execution_auditor": {
+        "execution_auditor",
+    },
+    "domain_orchestrator": {
+        "domain_orchestrator",
+    },
+    "specialist_agent": {
+        "specialist_agent",
+    },
+    # Internal bootstrap — session layer may load any agent to instantiate them
+    "_session": {
+        "orchestrator", "security_agent", "audit_agent", "coherence_agent",
+        "compliance_agent", "evaluation_agent", "standards_agent",
+        "documentation_agent", "research_orchestrator", "logistics_agent",
+        "execution_auditor", "domain_orchestrator", "specialist_agent",
+    },
+}
 
 
 @dataclass
@@ -104,6 +167,39 @@ class FrameworkLoader:
             name=name,
             content=skill_path.read_text(encoding="utf-8"),
         )
+
+    # ------------------------------------------------------------------
+    # Role-authorized agent loading (sys/_index.md load table enforcement)
+    # ------------------------------------------------------------------
+
+    def load_agent_for_role(self, name: str, requesting_role: str) -> AgentConfig:
+        """Load an agent config, enforcing the role-based authorization table.
+
+        Args:
+            name:            Agent to load (e.g. "specialist_agent").
+            requesting_role: Role of the agent making the request.
+                             Use "_session" for internal session-layer loads.
+
+        Returns:
+            AgentConfig — same as load_agent().
+
+        Raises:
+            PermissionError: If requesting_role is not authorized to load name.
+            FileNotFoundError: If the agent files are missing.
+        """
+        authorized = _AUTHORIZED_LOADS.get(requesting_role, set())
+        if name not in authorized:
+            violation_msg = (
+                f"[LoadViolation] role '{requesting_role}' attempted to load "
+                f"agent '{name}' — not in authorized list. "
+                f"Authorized: {sorted(authorized) or 'none'}. "
+                f"See sys/_index.md §Load Table by Role."
+            )
+            logger.error(violation_msg)
+            raise PermissionError(violation_msg)
+
+        logger.debug("[FrameworkLoader] authorized: %s → %s", requesting_role, name)
+        return self.load_agent(name)
 
     # ------------------------------------------------------------------
     # sys/ loading
