@@ -151,6 +151,7 @@ class AsyncSession:
         all_expert_results: list[ExpertResult] = []
         total_tokens = 0
         consecutive_rejections = 0
+        _result_for_index: AsyncSessionResult | None = None  # set at every exit point
 
         try:
             # PHASE 1 — DAG (use provided or build minimal stub)
@@ -200,7 +201,7 @@ class AsyncSession:
 
                         if consecutive_rejections >= GateEvaluator.CIRCUIT_BREAKER_THRESHOLD:
                             self._session_mgr.close(session_id, status="failed")  # type: ignore
-                            return AsyncSessionResult(
+                            _result_for_index = AsyncSessionResult(
                                 session_id=session_id,
                                 objective=objective,
                                 status="circuit_breaker",
@@ -210,6 +211,7 @@ class AsyncSession:
                                 duration_ms=_now_ms() - start_ms,
                                 warnings=warnings,
                             )
+                            return _result_for_index
 
             # GATE 2b — lint + pytest MUST pass before closure (Tier 1, blocking)
             lint_result = await self._executor.run("run_lint")
@@ -225,6 +227,16 @@ class AsyncSession:
             if not lint_result.success or not pytest_result.success:
                 failed_tool = lint_result if not lint_result.success else pytest_result
                 self._session_mgr.close(session_id, status="failed")  # type: ignore
+                _result_for_index = AsyncSessionResult(
+                    session_id=session_id,
+                    objective=objective,
+                    status="failed",
+                    expert_results=all_expert_results,
+                    gate_verdicts=gate_verdicts,
+                    total_tokens=total_tokens,
+                    duration_ms=_now_ms() - start_ms,
+                    warnings=warnings + [f"Gate 2b blocked by: {failed_tool.command}"],
+                )
                 raise BlockedByToolError(failed_tool.to_agent_summary())
 
             gate_verdicts["GATE_2B"] = "APPROVED"
@@ -237,7 +249,7 @@ class AsyncSession:
             self._log(session_id, "PHASE_8", "session_close", "COMPLETED", 1, 0,
                       {"total_tokens": total_tokens})
 
-            return AsyncSessionResult(
+            _result_for_index = AsyncSessionResult(
                 session_id=session_id,
                 objective=objective,
                 status="completed",
@@ -247,9 +259,14 @@ class AsyncSession:
                 duration_ms=_now_ms() - start_ms,
                 warnings=warnings,
             )
+            return _result_for_index
 
         finally:
             if self._telemetry:
+                if _result_for_index is not None:
+                    self._telemetry.write_index_entry(
+                        _build_index_entry(_result_for_index, classification, self._provider_name)
+                    )
                 self._telemetry.close()
 
     # ------------------------------------------------------------------
@@ -421,3 +438,30 @@ class AsyncSession:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _build_index_entry(
+    result: AsyncSessionResult,
+    classification: ClassificationResult,
+    provider: str,
+) -> dict:
+    """Build the compact summary written to logs/index.jsonl.
+
+    One line per session — queryable with jq:
+        jq 'select(.status=="failed")' logs/index.jsonl
+        jq 'select(.complexity_level==2)' logs/index.jsonl
+        jq '[.total_tokens] | add' logs/index.jsonl
+    """
+    return {
+        "session_id":      result.session_id,
+        "objective":       result.objective[:120],
+        "status":          result.status,
+        "complexity_level": classification.level,
+        "fast_track":      classification.fast_track,
+        "provider":        provider,
+        "total_tokens":    result.total_tokens,
+        "duration_ms":     result.duration_ms,
+        "expert_count":    len(result.expert_results),
+        "gate_verdicts":   result.gate_verdicts,
+        "warning_count":   len(result.warnings),
+    }

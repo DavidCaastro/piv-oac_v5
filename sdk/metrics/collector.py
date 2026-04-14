@@ -38,6 +38,8 @@ class TelemetryLogger:
     ) -> None:
         self.session_id = session_id
         self._log_type = log_type
+        self._log_dir = log_dir
+        self._index_path = log_dir / "index.jsonl"
 
         log_path = log_dir / log_type / f"{session_id}.jsonl"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,6 +76,21 @@ class TelemetryLogger:
                 args=(entry,),
                 daemon=True,
             ).start()
+
+    def write_index_entry(self, summary: dict[str, Any]) -> None:
+        """Append one summary line to logs/index.jsonl (cross-session index).
+
+        Called once per session at closure — before close().
+        The index is the single queryable record of all sessions ever run:
+            jq 'select(.status=="failed")' logs/index.jsonl
+        """
+        if "timestamp_iso" not in summary:
+            now_ms = int(time.time() * 1000)
+            summary = {"timestamp_iso": _ms_to_iso(now_ms), **summary}
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        with self._index_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(summary, ensure_ascii=False) + "\n")
+            fh.flush()
 
     def close(self) -> None:
         """Close the log file. Called at PHASE 8 session closure."""
