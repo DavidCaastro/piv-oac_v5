@@ -3,7 +3,7 @@
 > Living reference document. Consolidates every architectural decision, migration mapping,
 > and task status for the v5.0 build. Update STATUS as work progresses.
 >
-> Last updated: 2026-04-14
+> Last updated: 2026-04-14 (session 2)
 > Previous version source: https://github.com/DavidCaastro/factory/tree/agent-configs
 
 ---
@@ -1586,6 +1586,24 @@ Note: 9 skills absorbed into defined structure files. 21 remain as `skills/` mod
 
 Protocol version in v5.0: PMIA v5.0 (same logic, new versioning baseline)
 
+**STATUS: Implemented in `sdk/pmia/` — commit f00937f (2026-04-14 session 2)**
+
+### SDK Implementation (`sdk/pmia/`)
+
+| File | Responsibility |
+|---|---|
+| `sdk/pmia/messages.py` | `PMIAMessage` frozen dataclass, 4 `MessageType` enums, `GateId`, `Verdict`, `EscalationReason`, `AlertSeverity`. Factory functions: `gate_verdict()`, `escalation()`, `cross_alert()`, `checkpoint_req()`. Hard limits: `_MAX_MSG_CHARS=1200` (≈300 tokens), `_MAX_TEXT_CHARS=800` (≈200 tokens). |
+| `sdk/pmia/broker.py` | `PMIABroker`: HMAC-SHA256 signing (key from `PIV_PMIA_SECRET` env, fallback ephemeral dev key). AuditAgent logging before any handler runs. Max 2 retries → `PROTOCOL_VIOLATION` escalation. `CROSS_ALERT` from SecurityAgent sets `_veto_active=True` immediately — overrides all gate verdicts. |
+| `sdk/pmia/__init__.py` | Package exports: all message types, broker, factory functions. |
+
+### Wiring in AsyncSession (`sdk/core/session_async.py`)
+
+- `self._broker = PMIABroker(session_id, telemetry_logger)` — instantiated after telemetry init
+- Circuit breaker → `broker.send(escalation(UNRESOLVABLE_CONFLICT))`
+- Gate 2b fail → `broker.send(gate_verdict(BLOCKED_BY_TOOL))`
+- Gate 2b pass → `broker.send(gate_verdict(APPROVED))`
+- `broker.close()` in `finally` block at session end
+
 ### Message Types
 
 | Type | Direction | Purpose |
@@ -1598,10 +1616,10 @@ Protocol version in v5.0: PMIA v5.0 (same logic, new versioning baseline)
 ### Constraints
 
 - Maximum message size: **300 tokens**
-- Signature: **HMAC-SHA256** (key from Vault, never exposed in context)
-- Malformed message retry: maximum **2 attempts**, then escalate
+- Signature: **HMAC-SHA256** (key from `PIV_PMIA_SECRET` env var — never exposed in context)
+- Malformed message retry: maximum **2 attempts**, then escalate to `PROTOCOL_VIOLATION`
 - No credentials or secrets in any message payload
-- All messages logged by AuditAgent before processing
+- All messages logged by AuditAgent BEFORE any handler processes them
 
 ---
 
@@ -1833,6 +1851,9 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | SafeLocalExecutor wired into AsyncSession | 2026-04-14 | worktree_add before each specialist LLM call, worktree_remove in success + error paths. Gate 2b: run_lint + run_pytest block closure — raises BlockedByToolError if either fails. worktree_prune after all experts. |
 | ProviderRouter wired to ComplexityClassifier | 2026-04-14 | Fixed: agent_level was hardcoded "L2". Now: complexity.level → _COMPLEXITY_TO_AGENT_LEVEL → ProviderRouter.resolve_tier() + get_provider(). classification propagated to every DAG node. |
 | `logs/index.jsonl` — cross-session historical index | 2026-04-14 | TelemetryLogger.write_index_entry() appends one summary line per session at close. Captures: session_id, objective, status, complexity_level, tokens, duration, gate_verdicts. Written at all exit points (completed, circuit_breaker, Gate 2b failure). |
+| `sdk/pmia/` — PMIA v5.0 broker implementation (Gap 1) | 2026-04-14 s2 | messages.py: PMIAMessage frozen dataclass, 4 MessageType, factory functions, 300-token hard limit. broker.py: PMIABroker with HMAC-SHA256 signing, AuditAgent log before dispatch, max 2 retries → PROTOCOL_VIOLATION, CROSS_ALERT veto flag. __init__.py: package exports. Commit f00937f. |
+| `sdk/core/loader.py` — lazy loading enforcement (Gap 2) | 2026-04-14 s2 | _AUTHORIZED_LOADS dict mirrors sys/_index.md §Load Table by Role. load_agent_for_role() raises PermissionError on violations, logs [LoadViolation] for ExecutionAuditor. "_session" role authorized for all 13 agents. Commit f00937f. |
+| `sdk/core/session_async.py` — broker wiring (Gap 3) | 2026-04-14 s2 | PMIABroker instantiated after telemetry. Gate 2b BLOCKED_BY_TOOL / APPROVED verdicts emitted via broker. Circuit breaker emits ESCALATION(UNRESOLVABLE_CONFLICT). broker.close() in finally. Commit f00937f. |
 
 ### Next (ordered by priority)
 
@@ -1867,4 +1888,26 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ~~27~~ | ~~Wire SafeLocalExecutor into AsyncSession (Gate 2b + worktree lifecycle)~~ | ~~P2~~ | DONE |
 | ~~28~~ | ~~Wire ProviderRouter to ComplexityClassifier output~~ | ~~P2~~ | DONE |
 | ~~29~~ | ~~`logs/index.jsonl` cross-session historical index~~ | ~~P2~~ | DONE |
-| 30 | Compute SHA-256 hashes for all 21 `skills/manifest.json` entries | P3 | PENDING |
+| ~~30~~ | ~~`sdk/pmia/` — PMIA broker (Gap 1 v4→v5)~~ | ~~P2~~ | DONE — f00937f |
+| ~~31~~ | ~~`sdk/core/loader.py` — lazy loading enforcement (Gap 2 v4→v5)~~ | ~~P2~~ | DONE — f00937f |
+| ~~32~~ | ~~`sdk/core/session_async.py` — broker wiring (Gap 3 v4→v5)~~ | ~~P2~~ | DONE — f00937f |
+| ~~33~~ | ~~Compute SHA-256 hashes for all 21 `skills/manifest.json` entries~~ | ~~P3~~ | DONE |
+
+### Impact Analysis — Session 2 (2026-04-14)
+
+| Gap closed | Runtime impact |
+|---|---|
+| `sdk/pmia/` | PMIA protocol now enforced in code, not just markdown. Every inter-agent message is HMAC-signed, size-validated, audit-logged before dispatch. CROSS_ALERT veto is machine-enforced in broker, not advisory. |
+| `sdk/core/loader.py` `_AUTHORIZED_LOADS` | Any unauthorized `load_agent_for_role()` call raises `PermissionError` and logs a `[LoadViolation]` event. ExecutionAuditor now has structured signals to monitor. Previously: no enforcement existed. |
+| `sdk/core/session_async.py` broker wiring | Gate 2b verdicts and circuit-breaker escalations are now actual PMIA messages (signed, logged). Previously: gate logic ran but produced no protocol-level messages. |
+| `skills/manifest.json` SHA-256 hashes | `SHA256Verifier.verify()` in `FrameworkLoader.load_skill()` now works end-to-end. Any tampered skill file is rejected at load time. Previously: all entries were "PENDING" — verifier would always fail. |
+
+### Remaining open work
+
+| # | Task | Priority | Notes |
+|---|---|---|---|
+| 34 | Sub-agent recursive depth ≤ 2 (context saturation fragmentation) | LOW | Not blocking. SecurityAgent fragments into ≤6 sub-agents per contracts. Enforcement not wired in AsyncSession. |
+| 35 | `CHECKPOINT_REQ` emissions in AsyncSession | LOW | Phase transitions should emit checkpoint_req to AuditAgent via broker. Currently only Gate 2b + circuit breaker emit PMIA messages. |
+| 36 | `engram/` read path — `sdk/engram/reader.py` — role-scoped atom reads | MED | Reader exists as stub (raises NotImplementedError). Blocks AuditAgent write path at PHASE 8. |
+| 37 | `sdk/core/dag.py` — real DAG construction from confirmed specs | MED | Currently stub. Blocks full session execution (PHASE 1→5 flow). |
+| 38 | `sdk/core/interview.py` + `sdk/core/spec_writer.py` | MED | PHASE 0.1/0.2 stubs. Blocks spec-driven execution (DAG built from raw objective today). |
