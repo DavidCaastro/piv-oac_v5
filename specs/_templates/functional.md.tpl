@@ -30,23 +30,9 @@
 
 ## Task Decomposition
 
-<!-- Task blocks below are parsed by sdk/core/dag.py SpecDAGParser.          -->
-<!-- Format: ### task::<node_id> followed by key: value lines.                -->
-<!-- node_id must be unique, snake_case or kebab-case, no spaces.             -->
-<!-- depends_on: comma-separated node_ids, or "(none)" if root task.          -->
-<!-- files_in_scope: comma-separated relative paths, or "(tbd)" if unknown.   -->
-<!-- experts: integer ≥ 1. Use 2+ only for parallelisable subtasks.           -->
+<!-- Task blocks below are parsed by sdk/core/dag.SpecDAGParser.        -->
+<!-- Format: ### task::<node_id> followed by key: value lines.           -->
+<!-- node_id: unique, kebab-case. depends_on: comma-separated or (none). -->
+<!-- files_in_scope: comma-separated paths or (tbd). experts: int ≥ 1.   -->
 
-### task::{{task_1_id}}
-- **domain**: {{task_1_domain}}
-- **description**: {{task_1_description}}
-- **depends_on**: (none)
-- **files_in_scope**: {{task_1_files}}
-- **experts**: 1
-
-### task::{{task_2_id}}
-- **domain**: {{task_2_domain}}
-- **description**: {{task_2_description}}
-- **depends_on**: {{task_1_id}}
-- **files_in_scope**: {{task_2_files}}
-- **experts**: 1
+{{task_decomposition}}

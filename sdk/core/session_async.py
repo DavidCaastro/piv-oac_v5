@@ -178,6 +178,9 @@ class AsyncSession:
                 else CallbackHandler(on_question)
             )
             interview_answers = run_interview(objective, handler)
+            # Inject session context so template variables are fully resolved
+            interview_answers["session_id"] = session_id
+            interview_answers["created_at"] = _iso_now()
             self._log(session_id, "PHASE_0_1", "interview_complete", "OK", 1, 0, {
                 "keys_collected": list(interview_answers.keys()),
             })
