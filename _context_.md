@@ -3,7 +3,7 @@
 > Living reference document. Consolidates every architectural decision, migration mapping,
 > and task status for the v5.0 build. Update STATUS as work progresses.
 >
-> Last updated: 2026-04-15 (session 4)
+> Last updated: 2026-04-15 (session 5)
 > Previous version source: https://github.com/DavidCaastro/factory/tree/agent-configs
 
 ---
@@ -1554,50 +1554,38 @@ Load request flow:
 
 ### Skills to Migrate from v4.0
 
-9 skills are absorbed into defined structure files. 22 skills remain as `skills/*.md` modules.
+**v5.0 migration note:** Initial plan absorbed 9 skills into sys/contracts/sdk. In practice, all skills
+were implemented as explicit `skills/*.md` files for discoverability and manifest verification.
+Session 5 v5.1 audit vs v4 resulted in 3 new skills and expanded depth across all existing ones.
 
-**Absorbed into defined structure (not separate skill files in v5.0):**
+**`skills/*.md` modules — 24 files (v5.1 actual):**
 
-| Skill | Absorbed into | Why |
+| Skill | Lines | Status |
 |---|---|---|
-| `context-management.md` | `sys/_index.md` (lazy loading rules section) | Elevated to environment layer — governs all agents |
-| `worktree-automation.md` | `sys/worktrees.md` | Elevated to environment layer |
-| `inter-agent-protocol.md` | `contracts/_base.md` | Elevated to base contract — mandatory for all agents |
-| `session-continuity.md` | `agents/orchestrator.md` (session section) + `.piv/` schema | Orchestrator responsibility |
-| `observability.md` | `sdk/metrics/collector.py` + `observability/` | Implemented as code + Docker stack |
-| `parallel_safety.md` | `contracts/specialist_agent.md` (isolation section) | Part of specialist contract |
-| `ci-loop.md` | `sys/git.md` (GitHub Actions guidelines) | Environment layer |
-| `init.md` | `sdk/core/init.py` | Implemented as SDK code |
-| `evaluation.md` | `contracts/evaluation_agent.md` | Per-agent contract format |
-
-**Remaining as `skills/*.md` modules (22 files):**
-
-| Skill | Priority |
-|---|---|
-| `orchestration.md` | P1 |
-| `agent-contracts.md` | P2 |
-| `agent-factory.md` | P2 |
-| `fault-recovery.md` | P2 |
-| `backend-security.md` | P2 |
-| `testing.md` | P2 |
-| `standards.md` | P2 |
-| `cost-control.md` | P2 |
-| `decoupling.md` | P2 |
-| `layered-architecture.md` | P2 |
-| `model-abstraction.md` | P2 |
-| `multi-provider.md` | P2 |
-| `compliance.md` | P3 |
-| `change-management.md` | P3 |
-| `api-design.md` | P3 |
-| `framework-quality.md` | P3 |
-| `product-docs.md` | P3 |
-| `production-readiness.md` | P3 |
-| `research-methodology.md` | P3 |
-| `source-evaluation.md` | P3 |
-| `tech_spec_sheet.md` | P3 |
-| `rust-tauri-ci.md` | DISCARD (product-specific) |
-
-Note: 9 skills absorbed into defined structure files. 21 remain as `skills/` modules.
+| `bias-audit.md` | 208 | NEW — session 5 (BiasAuditAgent: 4 directives, red team, multi-LLM audit) |
+| `change-management.md` | 148 | NEW — session 5 (restored from v4: change classification, manifest integrity, rollback) |
+| `coherence-analysis.md` | — | NEW v5 — CoherenceAgent git-centric conflict analysis |
+| `complexity-analysis.md` | — | NEW v5 — ComplexityClassifier keywords, Gate 0 fast-track |
+| `compliance-scoping.md` | 459 | EXPANDED — session 5 (GDPR/CCPA/HIPAA/PCI, OWASP x2, license matrix) |
+| `context-management.md` | 234 | EXPANDED — session 5 (cascade protocol, InheritanceGuard, VETO_SATURACIÓN) |
+| `dag-design.md` | 212 | EXPANDED — session 5 (Kahn's algorithm, batch decomposition, split strategies) |
+| `documentation-generation.md` | 258 | EXPANDED — session 5 (Gate 3 blocking rule, OpenAPI checklist, StandardsAgent protocol) |
+| `engram-management.md` | — | NEW v5 — EngramWriter/Reader, atomic writes, access control |
+| `evaluation-rubric.md` | 165 | EXPANDED — session 5 (5D scoring tables, early termination ≤0.20) |
+| `fault-recovery.md` | 212 | NEW — session 5 (restored from v4: 7 fault types, backoff, model fallback chain) |
+| `gate-protocol.md` | — | NEW v5 — 5 gates, GATE_VERDICT format, circuit breaker |
+| `git-branch-automation.md` | — | NEW v5 — branch lifecycle, Gate 1 merge, safety rules |
+| `injection-defense.md` | — | NEW v5 — prompt injection, shell injection, jailbreak patterns |
+| `metrics-collection.md` | — | NEW v5 — agent _log block, MetricsCollector, OTEL fire-and-forget |
+| `observability.md` | 436 | EXPANDED — session 5 (OTEL, 6 canonical metrics, Grafana panels, 4 critical alerts) |
+| `parallel-safety.md` | — | NEW v5 — expert isolation boundary, CROSS_ALERT conditions |
+| `provider-routing.md` | 216 | EXPANDED — session 5 (role→model mapping, degradation chain, YAML profiles) |
+| `research-methodology.md` | — | MIGRATED v4 — PHASE 0-8 alignment, epistemic gate, source quality tiers |
+| `session-continuity.md` | 324 | EXPANDED — session 5 (dual-artifact, PHASE 0/5 recovery, closure protocol) |
+| `spec-writing.md` | 217 | EXPANDED — session 5 (immutability rule, confirmation workflow, task block format) |
+| `token-budget-estimation.md` | 212 | EXPANDED — session 5 (per-agent caps, throttling rules, model cost table) |
+| `vault-protocol.md` | — | NEW v5 — zero-hardcode rule, MCP integration, audit trail |
+| `worktree-automation.md` | — | MIGRATED v4 — lifecycle, naming convention, isolation invariants |
 
 ---
 
@@ -1829,7 +1817,7 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | OD-06 | Skills: audit all 31 before migrating or migrate then audit? | Migrate then audit per module (P3). 9 promoted to contracts/sys level already. | RESOLVED |
 | OD-07 | Session state format: JSON or YAML? | JSON for `.piv/` runtime state. YAML for `config/` static configuration. | RESOLVED |
 | OD-08 | `engram/` scaffold: create now or at first write? | Created at bootstrap. EngramWriter (sdk/engram/writer.py) handles AuditAgent writes at PHASE 8. Both scaffold and write path implemented. | RESOLVED |
-| OD-09 | Compliance scope for the framework itself? | Framework has no user data → MINIMAL. To confirm. | Open |
+| OD-09 | Compliance scope for the framework itself? | MINIMAL confirmed. Framework processes no user PII — it orchestrates agents that process user-supplied objectives. Compliance responsibility is delegated to the product workspace (user's repo). `compliance-scoping.md` covers the product layer; framework itself has NONE/MINIMAL scope by design. | RESOLVED |
 | OD-10 | Provider entrypoints: all now or per-provider as onboarded? | `CLAUDE.md` first. Others added as providers are onboarded. | RESOLVED |
 | OD-11 | Product workspace model? | Hybrid: Mode 1 = clone repo + branch separation. Mode 2 = pip install + piv-oac init seeds piv-directive + staging into user's repo. Both valid. | RESOLVED |
 
@@ -1847,8 +1835,8 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | v5.0 layer architecture defined | 2026-04-13 | Root / sys / SDK / Module layers |
 | `sys/` as gatekeeper confirmed | 2026-04-13 | Pre-flight verification + router. Adds `_verify.md`. |
 | `git/` folder confirmed at root | 2026-04-13 | topology.md, protection.md, policy.md |
-| `contracts/` confirmed at root | 2026-04-13 | _base.md + 12 per-agent files |
-| Per-agent files in `agents/` confirmed | 2026-04-13 | One file per agent, 13 agents |
+| `contracts/` confirmed at root | 2026-04-13 | _base.md + 12 per-agent files. Session 5: +1 (bias_auditor) → 13 per-agent + _base = 14 total |
+| Per-agent files in `agents/` confirmed | 2026-04-13 | One file per agent, 13 agents. Session 5: +1 (BiasAuditAgent) → 14 total |
 | SDK scenario B confirmed | 2026-04-13 | Publishable `piv-oac` package. `sdk/` reads sibling folders at runtime. |
 | Provider scripts confirmed at root | 2026-04-13 | `anthropic.py`, `ollama.py`, `openai.py` — thin wrappers |
 | `pyproject.toml` replaces `requirements.txt` | 2026-04-13 | Bundles all markdowns via package_data |
@@ -1871,13 +1859,15 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ProviderRouter wired to ComplexityClassifier | 2026-04-14 | Fixed: agent_level was hardcoded "L2". Now: complexity.level → _COMPLEXITY_TO_AGENT_LEVEL → ProviderRouter.resolve_tier() + get_provider(). classification propagated to every DAG node. |
 | `logs/index.jsonl` — cross-session historical index | 2026-04-14 | TelemetryLogger.write_index_entry() appends one summary line per session at close. Captures: session_id, objective, status, complexity_level, tokens, duration, gate_verdicts. Written at all exit points (completed, circuit_breaker, Gate 2b failure). |
 | `sdk/pmia/` — PMIA v5.0 broker implementation (Gap 1) | 2026-04-14 s2 | messages.py: PMIAMessage frozen dataclass, 4 MessageType, factory functions, 300-token hard limit. broker.py: PMIABroker with HMAC-SHA256 signing, AuditAgent log before dispatch, max 2 retries → PROTOCOL_VIOLATION, CROSS_ALERT veto flag. __init__.py: package exports. Commit f00937f. |
-| `sdk/core/loader.py` — lazy loading enforcement (Gap 2) | 2026-04-14 s2 | _AUTHORIZED_LOADS dict mirrors sys/_index.md §Load Table by Role. load_agent_for_role() raises PermissionError on violations, logs [LoadViolation] for ExecutionAuditor. "_session" role authorized for all 13 agents. Commit f00937f. |
+| `sdk/core/loader.py` — lazy loading enforcement (Gap 2) | 2026-04-14 s2 | _AUTHORIZED_LOADS dict mirrors sys/_index.md §Load Table by Role. load_agent_for_role() raises PermissionError on violations, logs [LoadViolation] for ExecutionAuditor. "_session" role authorized for all agents. Session 5: +bias_auditor → 14 agents total. Commit f00937f. |
 | `sdk/core/session_async.py` — broker wiring (Gap 3) | 2026-04-14 s2 | PMIABroker instantiated after telemetry. Gate 2b BLOCKED_BY_TOOL / APPROVED verdicts emitted via broker. Circuit breaker emits ESCALATION(UNRESOLVABLE_CONFLICT). broker.close() in finally. Commit f00937f. |
 | `CHECKPOINT_REQ` at all phase transitions | 2026-04-15 s3 | 4 emit points: PHASE_1 (DAG confirmed), PHASE_5 (per batch), GATE_2B (approved), PHASE_8 (pre-close). broker.close() added to finally block. Circuit-breaker indentation fixed. Commit 87ce26b. |
 | `sdk/engram/writer.py` — EngramWriter (AuditAgent write path) | 2026-04-15 s3 | append-only, atomic (temp+os.replace). write_json() for record.json, append() for markdown atoms with session_id+timestamp header. EngramWriteError on unauthorized role. Commit fca47ec. |
 | PHASE 8 engram writes wired in AsyncSession | 2026-04-15 s3 | audit/<session_id>/record.json (full snapshot) + gates/verdicts.md (rolling append) written at PHASE 8. EngramWriter exported from sdk/engram/__init__.py. Commit fca47ec. |
 | `sdk/core/dag.py` — SpecDAGParser | 2026-04-15 s3 | Regex parser for ### task::<node_id> blocks in specs/active/functional.md. Returns None on missing file/no blocks — callers fall back to stub. session_async.py PHASE 1 priority: provided→spec→stub. specs/_templates/functional.md.tpl defines format. Commit 293487b. |
 | `sdk/core/interview.py` + `sdk/core/spec_writer.py` — PHASE 0.1/0.2 wired | 2026-04-15 s3 | interview.py: 4-question standard set, run_interview() with key-first lookup (programmatic) + fallback to full question (console/callback). spec_writer.py: write_functional() now appends ## Task Decomposition with ### task:: blocks; _derive_tasks_from_scope() Tier-1 heuristic for when no explicit tasks provided. session_async.py: PHASE 0.1/0.2 run if level==2 and handler available. Commit 066060a. |
+| Skills v5.1 — full expansion from v4 depth audit | 2026-04-15 s5 | 9 existing skills expanded (observability 60→436, compliance-scoping 45→459, session-continuity 56→324, context-management 47→234, provider-routing 59→216, token-budget-estimation 57→212, documentation-generation 59→258, spec-writing 60→217, dag-design 52→212, evaluation-rubric 53→165). 3 new skills created (fault-recovery, change-management — restored from v4; bias-audit — new). manifest.json: 21→24 entries. VERSIONING.md baseline updated. bootstrap.sh 8/8 PASS. Commit aab3bfa. |
+| `BiasAuditAgent` — new agent (L1 specialized) | 2026-04-15 s5 | skills/bias-audit.md (208 lines): 4 directives (Ecosystem Neutrality, Red Teaming Semántico, Multi-LLM Audit, Deterministic Logic Preservation). Mandatory "Análisis de Sesgos y Dependencias" output section. agents/bias_auditor.md + contracts/bias_auditor.md: full PMIA tables, permissions, behavioral mandates, forbidden actions. sys/_index.md Load Table updated. sdk/core/loader.py: bias_auditor in _AUTHORIZED_LOADS + _session set (14 agents total). Commit aab3bfa. |
 
 ### Next (ordered by priority)
 
@@ -1915,7 +1905,7 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ~~30~~ | ~~`sdk/pmia/` — PMIA broker (Gap 1 v4→v5)~~ | ~~P2~~ | DONE — f00937f |
 | ~~31~~ | ~~`sdk/core/loader.py` — lazy loading enforcement (Gap 2 v4→v5)~~ | ~~P2~~ | DONE — f00937f |
 | ~~32~~ | ~~`sdk/core/session_async.py` — broker wiring (Gap 3 v4→v5)~~ | ~~P2~~ | DONE — f00937f |
-| ~~33~~ | ~~Compute SHA-256 hashes for all 21 `skills/manifest.json` entries~~ | ~~P3~~ | DONE |
+| ~~33~~ | ~~Compute SHA-256 hashes for all `skills/manifest.json` entries~~ | ~~P3~~ | DONE — 21 entries at time of task; 24 entries after session 5 (hashes recomputed in aab3bfa) |
 | ~~34~~ | ~~CHECKPOINT_REQ emissions at all phase transitions~~ | ~~P2~~ | DONE — 87ce26b |
 | ~~35~~ | ~~`sdk/engram/writer.py` — EngramWriter + PHASE 8 write path~~ | ~~P2~~ | DONE — fca47ec |
 | ~~36~~ | ~~`sdk/core/dag.py` — SpecDAGParser + spec-first DAG resolution~~ | ~~P2~~ | DONE — 293487b |
@@ -1942,6 +1932,15 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `run_interview()` + `write_functional()` task blocks | Full PHASE 0→1 pipeline live: interview answers → functional.md with `### task::` blocks → SpecDAGParser → multi-node DAG → parallel PHASE 5. Invariant "DAG never built from raw objective" now enforced in code. |
 | `SpecWriter` template substitution fix | Interview questions map 1:1 to `{{variable}}` placeholders in `functional.md.tpl`. `_render_template()` loads .tpl, substitutes all 9 variables, falls back to inline if template missing. `{{task_decomposition}}` replaces numbered `{{task_1_id}}` vars — scales to N tasks. Commit 0b1fc1a. |
 | Fragmentation depth enforcement + spec confirmation gate (items 38+39) | 2026-04-15 s4 | `_MAX_FRAGMENTATION_DEPTH=2`. `_handle_escalation()` on broker increments depth counter on CONTEXT_SATURATION; emits PROTOCOL_VIOLATION ESCALATION if depth > 2. `confirm_specs` param on `run_async()`: user must confirm specs before DAG construction; returns `status="spec_rejected"` on denial. Commit 86470ce. |
+
+### Impact Analysis — Session 5 (2026-04-15)
+
+| Implemented | Runtime impact |
+|---|---|
+| Skills v5.1 depth expansion (9 expanded, 3 new) | Skills now carry operational depth matching v4 maturity. Agents loading `observability`, `compliance-scoping`, `session-continuity`, `context-management`, `provider-routing`, `token-budget-estimation`, `documentation-generation` now receive actionable protocols (OTEL spans, GDPR checklists, recovery sequences, budget tiers, role→model mappings) instead of high-level descriptions. `fault-recovery` and `change-management` fill gaps that left fault handling and framework governance undocumented. |
+| BiasAuditAgent registered end-to-end | New L1 agent available to OrchestratorAgent for L2 tasks. BiasAuditAgent enforces vendor-neutrality, red-team validation, multi-LLM cross-audit, and RAG precedence. Every L2 architectural proposal must include "Análisis de Sesgos y Dependencias". Emits CROSS_ALERT(HIGH) on hallucinated parameters or lock-in risk=HIGH without migration path. |
+| manifest.json 21→24 entries + hashes recomputed | SHA-256 integrity covers all 24 skills. bootstrap.sh CHECK 6 passes. Any tampered skill file is rejected at load time for all 24, not just the original 21. |
+| OD-09 resolved (MINIMAL scope confirmed) | Compliance responsibility formally delegated to product workspace. Framework layer has no obligation to implement GDPR/CCPA/HIPAA controls — only document them via `compliance-scoping.md` for product agents to apply. |
 
 ### Impact Analysis — Session 4 (2026-04-15)
 
