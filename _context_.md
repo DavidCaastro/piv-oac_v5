@@ -3,7 +3,7 @@
 > Living reference document. Consolidates every architectural decision, migration mapping,
 > and task status for the v5.0 build. Update STATUS as work progresses.
 >
-> Last updated: 2026-04-15 (session 3)
+> Last updated: 2026-04-15 (session 4)
 > Previous version source: https://github.com/DavidCaastro/factory/tree/agent-configs
 
 ---
@@ -1920,8 +1920,8 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ~~35~~ | ~~`sdk/engram/writer.py` — EngramWriter + PHASE 8 write path~~ | ~~P2~~ | DONE — fca47ec |
 | ~~36~~ | ~~`sdk/core/dag.py` — SpecDAGParser + spec-first DAG resolution~~ | ~~P2~~ | DONE — 293487b |
 | ~~37~~ | ~~`sdk/core/interview.py` + `sdk/core/spec_writer.py` PHASE 0.1/0.2~~ | ~~P2~~ | DONE — 066060a |
-| 38 | SecurityAgent recursive depth ≤ 2 enforcement in AsyncSession | LOW | Remaining |
-| 39 | Spec confirmation gate (PHASE 0.2 → PHASE 1) | LOW | User must confirm specs before DAG build. Currently automatic. Requires confirm() on InterviewHandler. |
+| ~~38~~ | ~~SecurityAgent recursive depth ≤ 2 enforcement in AsyncSession~~ | ~~LOW~~ | DONE — 86470ce |
+| ~~39~~ | ~~Spec confirmation gate (PHASE 0.2 → PHASE 1)~~ | ~~LOW~~ | DONE — 86470ce |
 
 ### Impact Analysis — Session 2 (2026-04-14)
 
@@ -1941,6 +1941,14 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `SpecDAGParser` in `dag.py` | PHASE 1 resolves real multi-node DAGs from `specs/active/functional.md`. Previously: single-node stub always. Now: spec → N parallel experts. |
 | `run_interview()` + `write_functional()` task blocks | Full PHASE 0→1 pipeline live: interview answers → functional.md with `### task::` blocks → SpecDAGParser → multi-node DAG → parallel PHASE 5. Invariant "DAG never built from raw objective" now enforced in code. |
 | `SpecWriter` template substitution fix | Interview questions map 1:1 to `{{variable}}` placeholders in `functional.md.tpl`. `_render_template()` loads .tpl, substitutes all 9 variables, falls back to inline if template missing. `{{task_decomposition}}` replaces numbered `{{task_1_id}}` vars — scales to N tasks. Commit 0b1fc1a. |
+| Fragmentation depth enforcement + spec confirmation gate (items 38+39) | 2026-04-15 s4 | `_MAX_FRAGMENTATION_DEPTH=2`. `_handle_escalation()` on broker increments depth counter on CONTEXT_SATURATION; emits PROTOCOL_VIOLATION ESCALATION if depth > 2. `confirm_specs` param on `run_async()`: user must confirm specs before DAG construction; returns `status="spec_rejected"` on denial. Commit 86470ce. |
+
+### Impact Analysis — Session 4 (2026-04-15)
+
+| Implemented | Runtime impact |
+|---|---|
+| Fragmentation depth enforcement (`_MAX_FRAGMENTATION_DEPTH=2`) | AsyncSession now enforces the contracts/security_agent.md constraint: max 2 recursive fragmentation levels. Excessive CONTEXT_SATURATION escalations are caught in-process and escalated as PROTOCOL_VIOLATION via PMIA broker — no infinite sub-agent chains possible. |
+| Spec confirmation gate (`confirm_specs` on `run_async()`) | DAG construction is now gatable by user confirmation. Callers that set `confirm_specs=True` will receive `status="spec_rejected"` if the user rejects the spec, preventing any LLM/cloud cost. This closes the "DAG never built without confirmation" invariant stated in §11. |
 
 ### Remaining open work
 
@@ -1950,4 +1958,7 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ~~35~~ | ~~`sdk/engram/writer.py` — AuditAgent write path~~ | ~~MED~~ | DONE — fca47ec. Note: EngramReader was already complete; the missing piece was the Writer. |
 | ~~36~~ | ~~`sdk/core/dag.py` — SpecDAGParser from confirmed specs~~ | ~~MED~~ | DONE — 293487b |
 | ~~37~~ | ~~`sdk/core/interview.py` + `sdk/core/spec_writer.py` — PHASE 0.1/0.2~~ | ~~MED~~ | DONE — 066060a |
-| 38 | Sub-agent recursive depth ≤ 2 (SecurityAgent context saturation) | LOW | SecurityAgent fragments into ≤6 sub-agents per contracts. Enforcement not wired in AsyncSession. Non-blocking for current phase. |
+| ~~38~~ | ~~Sub-agent recursive depth ≤ 2 (SecurityAgent context saturation)~~ | ~~LOW~~ | DONE — 86470ce. `_MAX_FRAGMENTATION_DEPTH=2` in AsyncSession. `_handle_escalation()` registered on broker for ESCALATION messages. Increments counter on CONTEXT_SATURATION; emits PROTOCOL_VIOLATION if depth > 2. |
+| ~~39~~ | ~~Spec confirmation gate (PHASE 0.2 → PHASE 1)~~ | ~~LOW~~ | DONE — 86470ce. `confirm_specs: bool = False` on `run_async()`. If True and handler.confirm() returns False → returns `AsyncSessionResult(status="spec_rejected")` before DAG build. |
+
+> **All tracked open items resolved as of session 4.** Framework structural foundation (Phases 0–1 pipeline) is complete. Next work requires defining new items based on integration testing or Phase 2+ gaps.
