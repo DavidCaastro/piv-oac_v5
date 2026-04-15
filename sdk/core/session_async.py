@@ -27,6 +27,7 @@ from typing import Any
 from sdk.core.dag import DAG, DAGNode
 from sdk.core.loader import FrameworkLoader
 from sdk.core.session import CheckpointType, SessionManager
+from sdk.engram import EngramWriter
 from sdk.gates.evaluator import GateContext, GateEvaluator, GateType, GateVerdict
 from sdk.metrics import TelemetryLogger
 from sdk.pmia import (
@@ -101,10 +102,14 @@ class AsyncSession:
         self._loader = FrameworkLoader(self._repo_root)
         self._session_mgr = SessionManager(self._repo_root)
         self._telemetry: TelemetryLogger | None = None
-        self._gate_eval = GateEvaluator()
-        self._executor  = SafeLocalExecutor(project_root=self._repo_root)
+        self._gate_eval  = GateEvaluator()
+        self._executor   = SafeLocalExecutor(project_root=self._repo_root)
         self._router:  ProviderRouter | None = None   # built after providers bootstrap
         self._broker:  PMIABroker | None = None       # built after telemetry init
+        self._engram   = EngramWriter(
+            engram_root=self._repo_root / "engram",
+            role="audit_agent",
+        )
 
     @classmethod
     def init(
@@ -326,8 +331,35 @@ class AsyncSession:
                 ),
             ))
             self._session_mgr.close(session_id)
+
+            # PHASE 8 — AuditAgent writes to engram/ (append-only, atomic)
+            self._engram.write_json(
+                f"audit/{session_id}/record.json",
+                {
+                    "objective":      objective[:200],
+                    "status":         "completed",
+                    "complexity":     classification.level,
+                    "fast_track":     classification.fast_track,
+                    "provider":       self._provider_name,
+                    "total_tokens":   total_tokens,
+                    "duration_ms":    _now_ms() - start_ms,
+                    "expert_count":   len(all_expert_results),
+                    "gate_verdicts":  gate_verdicts,
+                    "warning_count":  len(warnings),
+                },
+                session_id=session_id,
+            )
+            # Append gate verdicts to rolling history atom
+            if gate_verdicts:
+                verdicts_section = (
+                    f"## Session {session_id[:8]} — {_iso_now()}\n\n"
+                    + "\n".join(f"- **{g}**: {v}" for g, v in gate_verdicts.items())
+                    + "\n"
+                )
+                self._engram.append("gates/verdicts.md", verdicts_section, session_id)
+
             self._log(session_id, "PHASE_8", "session_close", "COMPLETED", 1, 0,
-                      {"total_tokens": total_tokens})
+                      {"total_tokens": total_tokens, "engram_written": True})
 
             _result_for_index = AsyncSessionResult(
                 session_id=session_id,
@@ -520,6 +552,11 @@ class AsyncSession:
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _iso_now() -> str:
+    import time as _t
+    return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
 
 
 def _build_index_entry(
