@@ -1,10 +1,27 @@
-"""sdk/core/dag.py — DAGBuilder and DAGNode (Tier 1, deterministic, no LLM)."""
+"""sdk/core/dag.py — DAGBuilder, DAGNode, SpecDAGParser (Tier 1, deterministic, no LLM).
+
+SpecDAGParser reads specs/active/functional.md and extracts task blocks marked with:
+    ### task::<node_id>
+    - **domain**: <value>
+    - **description**: <value>
+    - **depends_on**: <node_id,...> or (none)
+    - **files_in_scope**: <path,...> or (tbd)
+    - **experts**: <int>
+
+If no functional.md exists or it contains no task blocks, parse() returns None
+so the caller can fall back to a stub DAG. Never raises on missing file.
+"""
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Iterator
+
+logger = logging.getLogger(__name__)
 
 
 class NodeStatus(str, Enum):
@@ -164,3 +181,128 @@ class DAG:
                 for nid, n in self.nodes.items()
             },
         }
+
+
+# ---------------------------------------------------------------------------
+# SpecDAGParser — Tier 1 parser for specs/active/functional.md task blocks
+# ---------------------------------------------------------------------------
+
+# Matches:  ### task::some-node-id
+_TASK_HEADING = re.compile(r"^###\s+task::([A-Za-z0-9_\-\.]+)\s*$", re.MULTILINE)
+
+# Matches:  - **key**: value
+_FIELD_LINE = re.compile(r"^\s*-\s+\*\*([a-z_]+)\*\*\s*:\s*(.+)$")
+
+
+class SpecDAGParser:
+    """Parse task blocks from specs/active/functional.md into a DAG.
+
+    Reads the functional spec produced by SpecWriter (PHASE 0.2).
+    Returns None when no spec or no task blocks are found — callers must
+    fall back to a stub DAG in that case.
+
+    All parsing is Tier 1 (regex, no LLM). Invalid or malformed task
+    blocks are logged and skipped; valid ones are assembled via DAGBuilder.
+    """
+
+    def __init__(self, specs_root: Path) -> None:
+        self._specs_root = specs_root
+
+    def parse(self) -> DAG | None:
+        """Parse specs/active/functional.md and return a validated DAG.
+
+        Returns:
+            DAG if ≥1 valid task blocks found, None otherwise.
+        """
+        functional_md = self._specs_root / "active" / "functional.md"
+        if not functional_md.exists():
+            logger.debug("[SpecDAGParser] specs/active/functional.md not found — stub DAG needed")
+            return None
+
+        text = functional_md.read_text(encoding="utf-8")
+        nodes = self._extract_nodes(text)
+
+        if not nodes:
+            logger.warning("[SpecDAGParser] No task blocks found in functional.md — stub DAG needed")
+            return None
+
+        builder = DAGBuilder()
+        for node in nodes:
+            try:
+                builder.add(node)
+            except DAGValidationError as exc:
+                logger.error("[SpecDAGParser] Skipping node '%s': %s", node.node_id, exc)
+
+        try:
+            dag = builder.build()
+            logger.info("[SpecDAGParser] DAG built: %d node(s)", len(dag.nodes))
+            return dag
+        except DAGValidationError as exc:
+            logger.error("[SpecDAGParser] DAG validation failed: %s — falling back to stub", exc)
+            return None
+
+    # ------------------------------------------------------------------
+    # Internal parsing helpers
+    # ------------------------------------------------------------------
+
+    def _extract_nodes(self, text: str) -> list[DAGNode]:
+        """Extract all task blocks from the markdown text."""
+        # Split on task headings to get per-task chunks
+        parts = _TASK_HEADING.split(text)
+        # parts = [preamble, node_id_1, body_1, node_id_2, body_2, ...]
+        nodes: list[DAGNode] = []
+
+        # Iterate pairs: (node_id, body)
+        for i in range(1, len(parts), 2):
+            node_id = parts[i].strip()
+            body    = parts[i + 1] if i + 1 < len(parts) else ""
+            node    = self._parse_block(node_id, body)
+            if node is not None:
+                nodes.append(node)
+
+        return nodes
+
+    def _parse_block(self, node_id: str, body: str) -> DAGNode | None:
+        """Parse a single task block body into a DAGNode."""
+        fields: dict[str, str] = {}
+        for line in body.splitlines():
+            m = _FIELD_LINE.match(line)
+            if m:
+                fields[m.group(1)] = m.group(2).strip()
+
+        # Require at minimum domain + description
+        if "domain" not in fields or "description" not in fields:
+            logger.warning(
+                "[SpecDAGParser] task::%s missing 'domain' or 'description' — skipped",
+                node_id,
+            )
+            return None
+
+        depends_raw = fields.get("depends_on", "(none)")
+        dependencies = (
+            []
+            if depends_raw.lower() in ("(none)", "none", "")
+            else [d.strip() for d in depends_raw.split(",") if d.strip()]
+        )
+
+        files_raw = fields.get("files_in_scope", "(tbd)")
+        files_in_scope = (
+            []
+            if files_raw.lower() in ("(tbd)", "tbd", "")
+            else [f.strip() for f in files_raw.split(",") if f.strip()]
+        )
+
+        experts_raw = fields.get("experts", "1")
+        try:
+            experts = max(1, int(experts_raw))
+        except ValueError:
+            experts = 1
+
+        return DAGNode(
+            node_id=node_id,
+            domain=fields["domain"],
+            description=fields["description"],
+            dependencies=dependencies,
+            experts=experts,
+            files_in_scope=files_in_scope,
+        )

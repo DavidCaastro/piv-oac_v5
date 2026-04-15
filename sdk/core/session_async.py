@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sdk.core.dag import DAG, DAGNode
+from sdk.core.dag import DAG, DAGNode, SpecDAGParser
 from sdk.core.loader import FrameworkLoader
 from sdk.core.session import CheckpointType, SessionManager
 from sdk.engram import EngramWriter
@@ -172,8 +172,12 @@ class AsyncSession:
         _result_for_index: AsyncSessionResult | None = None  # set at every exit point
 
         try:
-            # PHASE 1 — DAG (use provided or build minimal stub)
-            active_dag = dag or self._build_stub_dag(objective, classification.level)
+            # PHASE 1 — DAG: provided > spec-parsed > stub (priority order)
+            active_dag = (
+                dag
+                or SpecDAGParser(self._repo_root / "specs").parse()
+                or self._build_stub_dag(objective, classification.level)
+            )
             self._session_mgr.update(session_id, {"dag": active_dag.to_dict(), "phase": "PHASE_1"})
             self._log(session_id, "PHASE_1", "dag_build", "OK", 1, 0,
                       {"node_count": len(active_dag.nodes)})
