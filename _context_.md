@@ -1940,6 +1940,7 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `sdk/engram/writer.py` | AuditAgent write path exists: every completed session writes `audit/<session_id>/record.json` + appends to `gates/verdicts.md`. Engram grows across sessions. |
 | `SpecDAGParser` in `dag.py` | PHASE 1 resolves real multi-node DAGs from `specs/active/functional.md`. Previously: single-node stub always. Now: spec → N parallel experts. |
 | `run_interview()` + `write_functional()` task blocks | Full PHASE 0→1 pipeline live: interview answers → functional.md with `### task::` blocks → SpecDAGParser → multi-node DAG → parallel PHASE 5. Invariant "DAG never built from raw objective" now enforced in code. |
+| `SpecWriter` template substitution fix | Interview questions map 1:1 to `{{variable}}` placeholders in `functional.md.tpl`. `_render_template()` loads .tpl, substitutes all 9 variables, falls back to inline if template missing. `{{task_decomposition}}` replaces numbered `{{task_1_id}}` vars — scales to N tasks. Commit 0b1fc1a. |
 
 ### Remaining open work
 

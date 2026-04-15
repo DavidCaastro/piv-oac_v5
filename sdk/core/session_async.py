@@ -39,12 +39,13 @@ from sdk.metrics import TelemetryLogger
 from sdk.pmia import (
     GateId,
     PMIABroker,
+    PMIAMessage,
     Verdict,
     checkpoint_req,
     escalation,
     gate_verdict,
 )
-from sdk.pmia.messages import EscalationReason
+from sdk.pmia.messages import EscalationReason, MessageType
 from sdk.providers.base import ProviderRequest, ProviderResponse
 from sdk.providers.router import ProviderRouter
 from sdk.tools import BlockedByToolError, SafeLocalExecutor
@@ -55,6 +56,9 @@ from sdk.vault import Vault
 #   Level 1 (micro-task)     → L2  — mechanical, can run on local Ollama (Tier 2)
 #   Level 2 (architectural)  → L1  — requires genuine reasoning, cloud only (Tier 3)
 _COMPLEXITY_TO_AGENT_LEVEL: dict[int, str] = {1: "L2", 2: "L1"}
+
+# Item 38 — SecurityAgent fragmentation depth limit (contracts spec: ≤ 6 sub-agents, depth ≤ 2)
+_MAX_FRAGMENTATION_DEPTH = 2
 
 
 @dataclass
@@ -112,6 +116,7 @@ class AsyncSession:
         self._executor   = SafeLocalExecutor(project_root=self._repo_root)
         self._router:  ProviderRouter | None = None   # built after providers bootstrap
         self._broker:  PMIABroker | None = None       # built after telemetry init
+        self._fragmentation_depth: int = 0            # item 38: depth counter for CONTEXT_SATURATION
         self._engram   = EngramWriter(
             engram_root=self._repo_root / "engram",
             role="audit_agent",
@@ -133,16 +138,20 @@ class AsyncSession:
         answers: dict | None = None,
         on_question=None,
         dag: DAG | None = None,
+        confirm_specs: bool = False,
     ) -> AsyncSessionResult:
         """Execute full PIV/OAC protocol asynchronously.
 
         PHASE 5 runs all SpecialistAgents concurrently via asyncio.gather().
 
         Args:
-            objective:   The user's development goal.
-            answers:     Pre-supplied interview answers (programmatic mode).
-            on_question: Callback for custom UI interview mode.
-            dag:         Pre-built DAG (skips PHASE 1 DAG construction).
+            objective:     The user's development goal.
+            answers:       Pre-supplied interview answers (programmatic mode).
+            on_question:   Callback for custom UI interview mode.
+            dag:           Pre-built DAG (skips PHASE 1 DAG construction).
+            confirm_specs: If True, call handler.confirm() after PHASE 0.2 before
+                           building the DAG. User rejection → status="spec_rejected".
+                           Requires answers or on_question to be set.
 
         Returns:
             AsyncSessionResult with all expert outputs and gate verdicts.
@@ -164,6 +173,8 @@ class AsyncSession:
         )
         # PMIABroker requires telemetry to be ready (logs every message before processing)
         self._broker = PMIABroker(session_id=session_id, telemetry_logger=self._telemetry)
+        # Item 38 — register CONTEXT_SATURATION depth enforcer on the broker
+        self._broker.register(MessageType.ESCALATION, self._handle_escalation)
 
         self._log(session_id, "PHASE_0", "session_start", "OK", 1, 0, {
             "complexity_level": classification.level,
@@ -187,9 +198,26 @@ class AsyncSession:
 
             spec_writer = SpecWriter(self._repo_root / "specs")
             spec_writer.write_functional(interview_answers)
+            written = spec_writer.list_written()
             self._log(session_id, "PHASE_0_2", "spec_written", "OK", 1, 0, {
-                "files": [str(p) for p in spec_writer.list_written()],
+                "files": [str(p) for p in written],
             })
+
+            # Item 39 — spec confirmation gate (PHASE 0.2 → PHASE 1)
+            if confirm_specs:
+                spec_summary = (
+                    f"Specs written to specs/active/ ({len(written)} file(s)). "
+                    f"Proceed with DAG construction?"
+                )
+                if not handler.confirm(spec_summary):
+                    self._log(session_id, "PHASE_0_2", "spec_rejected", "ABORTED", 1, 0, {})
+                    _result_for_index = AsyncSessionResult(
+                        session_id=session_id,
+                        objective=objective,
+                        status="spec_rejected",
+                        duration_ms=_now_ms() - start_ms,
+                    )
+                    return _result_for_index
 
         warnings: list[str] = []
         gate_verdicts: dict[str, str] = {}
@@ -520,6 +548,39 @@ class AsyncSession:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _handle_escalation(self, msg: PMIAMessage) -> None:
+        """Item 38 — enforce fragmentation depth ≤ 2 for CONTEXT_SATURATION escalations.
+
+        Registered on PMIABroker for MessageType.ESCALATION.
+        When SecurityAgent (or any agent) escalates CONTEXT_SATURATION, depth is
+        incremented. If depth exceeds _MAX_FRAGMENTATION_DEPTH, a PROTOCOL_VIOLATION
+        escalation is sent instead of allowing further fragmentation.
+        """
+        if msg.payload.get("reason") != EscalationReason.CONTEXT_SATURATION.value:
+            return
+
+        self._fragmentation_depth += 1
+
+        if self._fragmentation_depth > _MAX_FRAGMENTATION_DEPTH:
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "[AsyncSession] CONTEXT_SATURATION depth %d exceeds max %d for agent %s — "
+                "fragmentation blocked, emitting PROTOCOL_VIOLATION",
+                self._fragmentation_depth,
+                _MAX_FRAGMENTATION_DEPTH,
+                msg.agent_id,
+            )
+            if self._broker:
+                self._broker.send(escalation(
+                    agent_id="AsyncSession",
+                    session_id=msg.session_id,
+                    reason=EscalationReason.PROTOCOL_VIOLATION,
+                    context=(
+                        f"Fragmentation depth {self._fragmentation_depth} exceeds "
+                        f"max {_MAX_FRAGMENTATION_DEPTH} — agent {msg.agent_id} blocked."
+                    ),
+                ))
 
     def _bootstrap_providers(self) -> None:
         """Initialise async provider instances and wire ProviderRouter."""
