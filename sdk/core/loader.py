@@ -61,12 +61,16 @@ _AUTHORIZED_LOADS: dict[str, set[str]] = {
     "specialist_agent": {
         "specialist_agent",
     },
+    "bias_auditor": {
+        "bias_auditor",
+    },
     # Internal bootstrap — session layer may load any agent to instantiate them
     "_session": {
         "orchestrator", "security_agent", "audit_agent", "coherence_agent",
         "compliance_agent", "evaluation_agent", "standards_agent",
         "documentation_agent", "research_orchestrator", "logistics_agent",
         "execution_auditor", "domain_orchestrator", "specialist_agent",
+        "bias_auditor",
     },
 }
 

@@ -68,4 +68,4 @@ Pruning is logged to `logs/sessions/<session_id>.jsonl` with:
 No pruned content is recoverable. Engram is not a backup system.
 
 ## skills-manifest
-390bbdcc0b6f4c9308ec15c351afc661fcdceb8912cf16395d913a0ca8146d98  skills/manifest.json
+02fcbc836b79a2bbf2b2ea77802ab3fae462b0e2a6a7f288033999f11d0fbd78  skills/manifest.json

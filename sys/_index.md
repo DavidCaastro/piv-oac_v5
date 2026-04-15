@@ -40,6 +40,7 @@ Agents load only what their role requires. Loading beyond this list is a context
 | ExecutionAuditor (L1) | `agents/execution_auditor.md` `contracts/execution_auditor.md` `contracts/_base.md` | — | `engram/`, product workspace files |
 | Domain Orchestrator (L1.5) | `agents/domain_orchestrator.md` `contracts/domain_orchestrator.md` `contracts/_base.md` `git/topology.md` | `engram/core/` `engram/domains/<project>/` — only if prior session for this domain | `engram/security/`, product workspace files |
 | Specialist Agent (L2) | `agents/specialist_agent.md` `contracts/specialist_agent.md` `contracts/_base.md` `specs/active/<task>.md` + assigned skills only | Product workspace — own task branch only | `engram/`, `sys/`, other task files |
+| BiasAuditAgent (L1) | `agents/bias_auditor.md` `contracts/bias_auditor.md` `contracts/_base.md` | `specs/active/` — when auditing L2 proposals; `engram/bias/` — if prior audit events exist | Product workspace files, `engram/security/`, `Vault` |
 
 ---
 
