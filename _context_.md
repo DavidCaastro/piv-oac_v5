@@ -3,7 +3,7 @@
 > Living reference document. Consolidates every architectural decision, migration mapping,
 > and task status for the v5.0 build. Update STATUS as work progresses.
 >
-> Last updated: 2026-04-14 (session 2)
+> Last updated: 2026-04-15 (session 3)
 > Previous version source: https://github.com/DavidCaastro/factory/tree/agent-configs
 
 ---
@@ -420,13 +420,22 @@ sdk/
 │
 ├── core/
 │   ├── loader.py            ← FrameworkLoader: reads agents/*.md + contracts/*.md at runtime
+│   │                           _AUTHORIZED_LOADS table + load_agent_for_role() enforcement
 │   ├── session.py           ← SessionManager: reads/writes .piv/, checkpoint protocol
-│   ├── session_async.py     ← AsyncSession: asyncio.gather() parallel PHASE 5
-│   │                           ProviderRouter wired — complexity level → tier
+│   ├── session_async.py     ← AsyncSession: full PHASE 0→8 orchestration
+│   │                           PHASE 0.1/0.2 wired (interview + spec_writer)
+│   │                           PHASE 1: SpecDAGParser → stub fallback
+│   │                           PHASE 5: asyncio.gather() parallel experts
+│   │                           PHASE 8: EngramWriter audit writes + broker.close()
+│   │                           PMIABroker wired at all gate + checkpoint transitions
 │   ├── dag.py               ← DAGBuilder, DAGNode, Kahn topological sort (Tier 1)
+│   │                           SpecDAGParser: parses ### task:: blocks from functional.md
 │   ├── init.py              ← Initializer: CASE A (new) / CASE B (resume) bootstrap
 │   ├── interview.py         ← InterviewHandler ABC + Console/Callback/PreSupplied modes
+│   │                           run_interview(): 4-question standard set, key-first lookup
 │   └── spec_writer.py       ← SpecWriter: answers → specs/active/ (PHASE 0.2)
+│                               write_functional() includes ## Task Decomposition with
+│                               ### task:: blocks parseable by SpecDAGParser
 │
 ├── providers/
 │   ├── base.py              ← BaseProvider ABC, ProviderRequest, ProviderResponse
@@ -444,7 +453,10 @@ sdk/
 │   └── evaluator.py         ← GateEvaluator: invariant checks + circuit breaker — Tier 1
 │
 ├── engram/
-│   └── reader.py            ← EngramReader: read-only, role-scoped access
+│   ├── reader.py            ← EngramReader: read-only, role-scoped access (_ROLE_SCOPE table)
+│   └── writer.py            ← EngramWriter: AuditAgent-only, append-only, atomic writes
+│                               write_json() for structured records, append() for markdown atoms
+│                               atomic via temp file + os.replace()
 │
 ├── metrics/
 │   └── collector.py         ← TelemetryLogger (flush-after-write, OTEL secondary)
@@ -997,28 +1009,35 @@ ComplexityClassifier.classify(objective)   ← heuristic only, Tier 1, zero LLM
 
 ### PHASE 0.1 — Structured Q&A (Level 2 only)
 
-Master Orchestrator generates clarifying questions from the objective.
-Questions are derived from what is missing to write a complete, unambiguous spec.
+**Implemented in `sdk/core/interview.py` — `run_interview()`.**
+Questions are a fixed standard set (`_STANDARD_QUESTIONS`) — not LLM-generated.
+Handler selected by caller: `PreSuppliedHandler` (answers dict), `CallbackHandler` (on_question),
+or `ConsoleHandler` (CLI). Short answer-key lookup tried first; falls back to full question text.
 
-| Complexity | Questions | Example |
+| Complexity | Questions asked | Example |
 |---|---|---|
-| Level 1 (micro) | 0 — interview skipped, Gate 0 fast-track | `fix typo in README` |
-| Level 2 simple | 2–3 | `add logging to auth module` |
-| Level 2 complex | Full interview, multiple rounds | `build Stripe payment integration` |
+| Level 1 (micro) | 0 — interview skipped entirely | `fix typo in README` |
+| Level 2 (any) | 4 standard questions (2 required, 2 optional) | `build Stripe payment integration` |
+
+**Standard questions:** scope (required), acceptance_criteria (required),
+constraints (optional), out_of_scope (optional).
 
 ### PHASE 0.2 — Spec Reformulation
 
-Answers are reformulated into formal specs written to `specs/active/`:
+**Implemented in `sdk/core/spec_writer.py` — `SpecWriter.write_functional()`.**
+Answers are written to `specs/active/functional.md`. The file includes a
+`## Task Decomposition` section with `### task::<node_id>` blocks parsed by `SpecDAGParser`.
 
 ```
 specs/active/
-├── functional.md     ← what the system must do (functional requirements)
-├── architecture.md   ← structural decisions (if Level 2 complex)
-└── quality.md        ← acceptance criteria, coverage thresholds
+├── functional.md     ← what the system must do + task decomposition blocks
+├── architecture.md   ← structural decisions (write_architecture() — Level 2 complex)
+└── quality.md        ← acceptance criteria, coverage thresholds (write_quality())
 ```
 
-**User must confirm specs before PHASE 1 begins.**
-Without confirmation: DAG is not built, no agents instantiated, no branches created.
+**Note:** User confirmation before PHASE 1 is architecturally required (documented here)
+but not yet implemented in `session_async.py`. Currently PHASE 0.2 → PHASE 1 is automatic.
+This is item 39 (future work).
 
 ### I/O Modes
 
@@ -1809,7 +1828,7 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | OD-05 | PMIA version: reset to v5.0 or inherit v4.0? | Reset to PMIA v5.0. Same logic, new versioning baseline. | RESOLVED |
 | OD-06 | Skills: audit all 31 before migrating or migrate then audit? | Migrate then audit per module (P3). 9 promoted to contracts/sys level already. | RESOLVED |
 | OD-07 | Session state format: JSON or YAML? | JSON for `.piv/` runtime state. YAML for `config/` static configuration. | RESOLVED |
-| OD-08 | `engram/` scaffold: create now or at first write? | Create directory scaffold now. Atoms written only by AuditAgent at PHASE 8. | Open |
+| OD-08 | `engram/` scaffold: create now or at first write? | Created at bootstrap. EngramWriter (sdk/engram/writer.py) handles AuditAgent writes at PHASE 8. Both scaffold and write path implemented. | RESOLVED |
 | OD-09 | Compliance scope for the framework itself? | Framework has no user data → MINIMAL. To confirm. | Open |
 | OD-10 | Provider entrypoints: all now or per-provider as onboarded? | `CLAUDE.md` first. Others added as providers are onboarded. | RESOLVED |
 | OD-11 | Product workspace model? | Hybrid: Mode 1 = clone repo + branch separation. Mode 2 = pip install + piv-oac init seeds piv-directive + staging into user's repo. Both valid. | RESOLVED |
@@ -1854,6 +1873,11 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `sdk/pmia/` — PMIA v5.0 broker implementation (Gap 1) | 2026-04-14 s2 | messages.py: PMIAMessage frozen dataclass, 4 MessageType, factory functions, 300-token hard limit. broker.py: PMIABroker with HMAC-SHA256 signing, AuditAgent log before dispatch, max 2 retries → PROTOCOL_VIOLATION, CROSS_ALERT veto flag. __init__.py: package exports. Commit f00937f. |
 | `sdk/core/loader.py` — lazy loading enforcement (Gap 2) | 2026-04-14 s2 | _AUTHORIZED_LOADS dict mirrors sys/_index.md §Load Table by Role. load_agent_for_role() raises PermissionError on violations, logs [LoadViolation] for ExecutionAuditor. "_session" role authorized for all 13 agents. Commit f00937f. |
 | `sdk/core/session_async.py` — broker wiring (Gap 3) | 2026-04-14 s2 | PMIABroker instantiated after telemetry. Gate 2b BLOCKED_BY_TOOL / APPROVED verdicts emitted via broker. Circuit breaker emits ESCALATION(UNRESOLVABLE_CONFLICT). broker.close() in finally. Commit f00937f. |
+| `CHECKPOINT_REQ` at all phase transitions | 2026-04-15 s3 | 4 emit points: PHASE_1 (DAG confirmed), PHASE_5 (per batch), GATE_2B (approved), PHASE_8 (pre-close). broker.close() added to finally block. Circuit-breaker indentation fixed. Commit 87ce26b. |
+| `sdk/engram/writer.py` — EngramWriter (AuditAgent write path) | 2026-04-15 s3 | append-only, atomic (temp+os.replace). write_json() for record.json, append() for markdown atoms with session_id+timestamp header. EngramWriteError on unauthorized role. Commit fca47ec. |
+| PHASE 8 engram writes wired in AsyncSession | 2026-04-15 s3 | audit/<session_id>/record.json (full snapshot) + gates/verdicts.md (rolling append) written at PHASE 8. EngramWriter exported from sdk/engram/__init__.py. Commit fca47ec. |
+| `sdk/core/dag.py` — SpecDAGParser | 2026-04-15 s3 | Regex parser for ### task::<node_id> blocks in specs/active/functional.md. Returns None on missing file/no blocks — callers fall back to stub. session_async.py PHASE 1 priority: provided→spec→stub. specs/_templates/functional.md.tpl defines format. Commit 293487b. |
+| `sdk/core/interview.py` + `sdk/core/spec_writer.py` — PHASE 0.1/0.2 wired | 2026-04-15 s3 | interview.py: 4-question standard set, run_interview() with key-first lookup (programmatic) + fallback to full question (console/callback). spec_writer.py: write_functional() now appends ## Task Decomposition with ### task:: blocks; _derive_tasks_from_scope() Tier-1 heuristic for when no explicit tasks provided. session_async.py: PHASE 0.1/0.2 run if level==2 and handler available. Commit 066060a. |
 
 ### Next (ordered by priority)
 
@@ -1892,6 +1916,12 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ~~31~~ | ~~`sdk/core/loader.py` — lazy loading enforcement (Gap 2 v4→v5)~~ | ~~P2~~ | DONE — f00937f |
 | ~~32~~ | ~~`sdk/core/session_async.py` — broker wiring (Gap 3 v4→v5)~~ | ~~P2~~ | DONE — f00937f |
 | ~~33~~ | ~~Compute SHA-256 hashes for all 21 `skills/manifest.json` entries~~ | ~~P3~~ | DONE |
+| ~~34~~ | ~~CHECKPOINT_REQ emissions at all phase transitions~~ | ~~P2~~ | DONE — 87ce26b |
+| ~~35~~ | ~~`sdk/engram/writer.py` — EngramWriter + PHASE 8 write path~~ | ~~P2~~ | DONE — fca47ec |
+| ~~36~~ | ~~`sdk/core/dag.py` — SpecDAGParser + spec-first DAG resolution~~ | ~~P2~~ | DONE — 293487b |
+| ~~37~~ | ~~`sdk/core/interview.py` + `sdk/core/spec_writer.py` PHASE 0.1/0.2~~ | ~~P2~~ | DONE — 066060a |
+| 38 | SecurityAgent recursive depth ≤ 2 enforcement in AsyncSession | LOW | Remaining |
+| 39 | Spec confirmation gate (PHASE 0.2 → PHASE 1) | LOW | User must confirm specs before DAG build. Currently automatic. Requires confirm() on InterviewHandler. |
 
 ### Impact Analysis — Session 2 (2026-04-14)
 
@@ -1902,12 +1932,21 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `sdk/core/session_async.py` broker wiring | Gate 2b verdicts and circuit-breaker escalations are now actual PMIA messages (signed, logged). Previously: gate logic ran but produced no protocol-level messages. |
 | `skills/manifest.json` SHA-256 hashes | `SHA256Verifier.verify()` in `FrameworkLoader.load_skill()` now works end-to-end. Any tampered skill file is rejected at load time. Previously: all entries were "PENDING" — verifier would always fail. |
 
+### Impact Analysis — Session 3 (2026-04-15)
+
+| Implemented | Runtime impact |
+|---|---|
+| `CHECKPOINT_REQ` at phase transitions | AuditAgent now receives structured state snapshots at PHASE_1, PHASE_5 (per batch), GATE_2B, PHASE_8. Full PMIA message lifecycle complete. |
+| `sdk/engram/writer.py` | AuditAgent write path exists: every completed session writes `audit/<session_id>/record.json` + appends to `gates/verdicts.md`. Engram grows across sessions. |
+| `SpecDAGParser` in `dag.py` | PHASE 1 resolves real multi-node DAGs from `specs/active/functional.md`. Previously: single-node stub always. Now: spec → N parallel experts. |
+| `run_interview()` + `write_functional()` task blocks | Full PHASE 0→1 pipeline live: interview answers → functional.md with `### task::` blocks → SpecDAGParser → multi-node DAG → parallel PHASE 5. Invariant "DAG never built from raw objective" now enforced in code. |
+
 ### Remaining open work
 
 | # | Task | Priority | Notes |
 |---|---|---|---|
-| 34 | Sub-agent recursive depth ≤ 2 (context saturation fragmentation) | LOW | Not blocking. SecurityAgent fragments into ≤6 sub-agents per contracts. Enforcement not wired in AsyncSession. |
-| 35 | `CHECKPOINT_REQ` emissions in AsyncSession | LOW | Phase transitions should emit checkpoint_req to AuditAgent via broker. Currently only Gate 2b + circuit breaker emit PMIA messages. |
-| 36 | `engram/` read path — `sdk/engram/reader.py` — role-scoped atom reads | MED | Reader exists as stub (raises NotImplementedError). Blocks AuditAgent write path at PHASE 8. |
-| 37 | `sdk/core/dag.py` — real DAG construction from confirmed specs | MED | Currently stub. Blocks full session execution (PHASE 1→5 flow). |
-| 38 | `sdk/core/interview.py` + `sdk/core/spec_writer.py` | MED | PHASE 0.1/0.2 stubs. Blocks spec-driven execution (DAG built from raw objective today). |
+| ~~34~~ | ~~CHECKPOINT_REQ emissions at phase transitions~~ | ~~LOW~~ | DONE — 87ce26b |
+| ~~35~~ | ~~`sdk/engram/writer.py` — AuditAgent write path~~ | ~~MED~~ | DONE — fca47ec. Note: EngramReader was already complete; the missing piece was the Writer. |
+| ~~36~~ | ~~`sdk/core/dag.py` — SpecDAGParser from confirmed specs~~ | ~~MED~~ | DONE — 293487b |
+| ~~37~~ | ~~`sdk/core/interview.py` + `sdk/core/spec_writer.py` — PHASE 0.1/0.2~~ | ~~MED~~ | DONE — 066060a |
+| 38 | Sub-agent recursive depth ≤ 2 (SecurityAgent context saturation) | LOW | SecurityAgent fragments into ≤6 sub-agents per contracts. Enforcement not wired in AsyncSession. Non-blocking for current phase. |
