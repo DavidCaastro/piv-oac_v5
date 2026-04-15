@@ -25,8 +25,14 @@ from pathlib import Path
 from typing import Any
 
 from sdk.core.dag import DAG, DAGNode, SpecDAGParser
+from sdk.core.interview import (
+    CallbackHandler,
+    PreSuppliedHandler,
+    run_interview,
+)
 from sdk.core.loader import FrameworkLoader
 from sdk.core.session import CheckpointType, SessionManager
+from sdk.core.spec_writer import SpecWriter
 from sdk.engram import EngramWriter
 from sdk.gates.evaluator import GateContext, GateEvaluator, GateType, GateVerdict
 from sdk.metrics import TelemetryLogger
@@ -163,6 +169,24 @@ class AsyncSession:
             "complexity_level": classification.level,
             "fast_track": classification.fast_track,
         })
+
+        # PHASE 0.1 + 0.2 — Interview + SpecWriter (Level 2, when handler available)
+        # Skipped for: Level 1 fast-track, caller-provided DAG, no handler supplied.
+        if not dag and not classification.fast_track and (answers or on_question):
+            handler = (
+                PreSuppliedHandler(answers) if answers
+                else CallbackHandler(on_question)
+            )
+            interview_answers = run_interview(objective, handler)
+            self._log(session_id, "PHASE_0_1", "interview_complete", "OK", 1, 0, {
+                "keys_collected": list(interview_answers.keys()),
+            })
+
+            spec_writer = SpecWriter(self._repo_root / "specs")
+            spec_writer.write_functional(interview_answers)
+            self._log(session_id, "PHASE_0_2", "spec_written", "OK", 1, 0, {
+                "files": [str(p) for p in spec_writer.list_written()],
+            })
 
         warnings: list[str] = []
         gate_verdicts: dict[str, str] = {}

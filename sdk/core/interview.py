@@ -114,3 +114,71 @@ class InterviewSession:
     def transcript(self) -> list[dict[str, str]]:
         """Return the full Q&A transcript (immutable view)."""
         return list(self._transcript)
+
+
+# ---------------------------------------------------------------------------
+# Standard PIV/OAC question set (PHASE 0.1 — Level 2 tasks only)
+# ---------------------------------------------------------------------------
+
+# Ordered list of (answer_key, question_text, required).
+# Optional questions: empty answer is accepted and key is omitted from result.
+_STANDARD_QUESTIONS: list[tuple[str, str, bool]] = [
+    (
+        "scope",
+        "What must be delivered? Describe the main components or features "
+        "(comma-separated or one per line).",
+        True,
+    ),
+    (
+        "acceptance_criteria",
+        "How will we know this is done? List acceptance criteria "
+        "(comma-separated or one per line).",
+        True,
+    ),
+    (
+        "constraints",
+        "Are there any technical constraints? (e.g. must use library X, "
+        "no breaking changes to API) — press Enter to skip.",
+        False,
+    ),
+    (
+        "out_of_scope",
+        "What is explicitly excluded from this task? — press Enter to skip.",
+        False,
+    ),
+]
+
+
+def run_interview(
+    objective: str,
+    handler: InterviewHandler,
+) -> dict[str, str]:
+    """Run the standard PHASE 0.1 interview and return collected answers.
+
+    Args:
+        objective: The user's raw objective — prepended to context.
+        handler:   I/O handler (Console, Callback, or PreSupplied).
+
+    Returns:
+        dict with keys: objective, scope, acceptance_criteria,
+        and optionally: constraints, out_of_scope.
+        Required keys are always present; optional keys only if non-empty.
+    """
+    session = InterviewSession(handler)
+    answers: dict[str, str] = {"objective": objective}
+
+    for key, question, required in _STANDARD_QUESTIONS:
+        # Try short key first (programmatic callers pass {scope: "...", ...}).
+        # Fall back to full question text (ConsoleHandler / CallbackHandler path).
+        try:
+            answer = handler.ask(key).strip()
+        except MissingAnswerError:
+            answer = session.ask(question).strip()
+
+        if answer:
+            answers[key] = answer
+        elif required:
+            # Required field left blank — use objective as fallback
+            answers[key] = objective
+
+    return answers
