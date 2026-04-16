@@ -3,7 +3,7 @@
 > Living reference document. Consolidates every architectural decision, migration mapping,
 > and task status for the v5.0 build. Update STATUS as work progresses.
 >
-> Last updated: 2026-04-15 (session 5)
+> Last updated: 2026-04-16 (session 6)
 > Previous version source: https://github.com/DavidCaastro/factory/tree/agent-configs
 
 ---
@@ -425,9 +425,20 @@ sdk/
 │   ├── session_async.py     ← AsyncSession: full PHASE 0→8 orchestration
 │   │                           PHASE 0.1/0.2 wired (interview + spec_writer)
 │   │                           PHASE 1: SpecDAGParser → stub fallback
-│   │                           PHASE 5: asyncio.gather() parallel experts
+│   │                           PHASE 1.5: BiasAuditAgent (L2 only) → bias_validator Tier 1 check
+│   │                           PHASE 5: asyncio.gather() parallel experts (model per agent)
 │   │                           PHASE 8: EngramWriter audit writes + broker.close()
 │   │                           PMIABroker wired at all gate + checkpoint transitions
+│   ├── bias_validator.py    ← Tier 1 deterministic validator for BiasAuditAgent output
+│   │                           validate_bias_output(): 6 regex checks, zero LLM calls
+│   │                           section_present(): quick header check for Gate 3
+│   │                           BiasValidationResult: valid, missing_sections, warnings,
+│   │                           red_team_result, multi_llm_result, lock_in_risks
+│   ├── model_registry.py    ← Per-agent model assignment across all providers (Tier 1)
+│   │                           ModelTier: FLAGSHIP / BALANCED / FAST
+│   │                           resolve_model(agent, provider, task_complexity, escalate)
+│   │                           14 agents mapped; dynamic escalation for audit/coherence/docs
+│   │                           4 providers: anthropic, openai, ollama, gemini
 │   ├── dag.py               ← DAGBuilder, DAGNode, Kahn topological sort (Tier 1)
 │   │                           SpecDAGParser: parses ### task:: blocks from functional.md
 │   ├── init.py              ← Initializer: CASE A (new) / CASE B (resume) bootstrap
@@ -1868,6 +1879,9 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `sdk/core/interview.py` + `sdk/core/spec_writer.py` — PHASE 0.1/0.2 wired | 2026-04-15 s3 | interview.py: 4-question standard set, run_interview() with key-first lookup (programmatic) + fallback to full question (console/callback). spec_writer.py: write_functional() now appends ## Task Decomposition with ### task:: blocks; _derive_tasks_from_scope() Tier-1 heuristic for when no explicit tasks provided. session_async.py: PHASE 0.1/0.2 run if level==2 and handler available. Commit 066060a. |
 | Skills v5.1 — full expansion from v4 depth audit | 2026-04-15 s5 | 9 existing skills expanded (observability 60→436, compliance-scoping 45→459, session-continuity 56→324, context-management 47→234, provider-routing 59→216, token-budget-estimation 57→212, documentation-generation 59→258, spec-writing 60→217, dag-design 52→212, evaluation-rubric 53→165). 3 new skills created (fault-recovery, change-management — restored from v4; bias-audit — new). manifest.json: 21→24 entries. VERSIONING.md baseline updated. bootstrap.sh 8/8 PASS. Commit aab3bfa. |
 | `BiasAuditAgent` — new agent (L1 specialized) | 2026-04-15 s5 | skills/bias-audit.md (208 lines): 4 directives (Ecosystem Neutrality, Red Teaming Semántico, Multi-LLM Audit, Deterministic Logic Preservation). Mandatory "Análisis de Sesgos y Dependencias" output section. agents/bias_auditor.md + contracts/bias_auditor.md: full PMIA tables, permissions, behavioral mandates, forbidden actions. sys/_index.md Load Table updated. sdk/core/loader.py: bias_auditor in _AUTHORIZED_LOADS + _session set (14 agents total). Commit aab3bfa. |
+| `sdk/core/bias_validator.py` — Tier 1 deterministic output validator | 2026-04-16 s6 | validate_bias_output(): 6 regex checks (section header, dependency table ≥1 row, Sesgos checklist, Red Team result, Multi-LLM audit, RAG conflicts). BiasValidationResult: valid, missing_sections, warnings, red_team_result, multi_llm_result, lock_in_risks. section_present() for Gate 3 quick check. Zero LLM calls. 3-case unit test PASSED. Commit 9ef6ab5. |
+| BiasAuditAgent PHASE 1.5 wiring in session_async.py | 2026-04-16 s6 | Activates for classification.level==2 and not fast_track. _run_bias_audit(): loads bias_auditor config + bias-audit skill, LLM call (FLAGSHIP via model_registry), validate_bias_output() Tier 1. GATE_VERDICT(REJECTED)+status="bias_rejected" on fail; GATE_VERDICT(APPROVED)+CHECKPOINT_REQ on pass. Non-fatal on load/provider error. Fix resp.tokens_used → input+output. Commit 9ef6ab5. |
+| `sdk/core/model_registry.py` — per-agent model assignment | 2026-04-16 s6 | resolve_model(agent, provider, task_complexity, escalate) → model string. ModelTier: FLAGSHIP/BALANCED/FAST. 14 agents mapped. FLAGSHIP: orchestrator, security_agent, bias_auditor. BALANCED: standards, compliance, evaluation, domain_orchestrator, specialist(L2). FAST: audit, coherence, logistics, execution_auditor, docs, specialist(L1). Dynamic escalation: audit/coherence/docs FAST→BALANCED on escalate=True. 4 providers: anthropic(opus/sonnet/haiku), openai(gpt-4o/gpt-4o/mini), ollama(32b/14b/7b), gemini(flash-exp/flash/flash). Unknown provider → anthropic fallback. 20-case matrix PASSED. session_async.py: specialist + bias_auditor use registry. Commit da933d7. |
 
 ### Next (ordered by priority)
 
@@ -1949,6 +1963,15 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | Fragmentation depth enforcement (`_MAX_FRAGMENTATION_DEPTH=2`) | AsyncSession now enforces the contracts/security_agent.md constraint: max 2 recursive fragmentation levels. Excessive CONTEXT_SATURATION escalations are caught in-process and escalated as PROTOCOL_VIOLATION via PMIA broker — no infinite sub-agent chains possible. |
 | Spec confirmation gate (`confirm_specs` on `run_async()`) | DAG construction is now gatable by user confirmation. Callers that set `confirm_specs=True` will receive `status="spec_rejected"` if the user rejects the spec, preventing any LLM/cloud cost. This closes the "DAG never built without confirmation" invariant stated in §11. |
 
+### Impact Analysis — Session 6 (2026-04-16)
+
+| Implemented | Runtime impact |
+|---|---|
+| `sdk/core/bias_validator.py` — Tier 1 deterministic validator | BiasAuditAgent output es ahora verificado por máquina antes de aceptarse. El LLM no puede "olvidar" incluir la sección requerida — 6 regex checks capturan cualquier elemento faltante. Costo cero de LLM para la validación. Red Team=FAILED y Multi-LLM=ISSUES_FOUND generan warnings accionables en telemetría. |
+| PHASE 1.5 — activación de BiasAuditAgent en session_async.py | Sesiones L2 tienen ahora un gate obligatorio de auditoría de sesgos arquitectónicos entre la construcción del DAG y la ejecución de expertos. `status="bias_rejected"` cortocircuita la sesión antes de cualquier costo LLM de PHASE 5 si la auditoría falla. GATE_VERDICT(REJECTED) fluye por el broker PMIA y queda en el audit log. |
+| `sdk/core/model_registry.py` — asignación de modelo por agente | Cada agente invoca el tier de modelo apropiado en lugar del global de sesión. Agentes FLAGSHIP (orchestrator, security, bias_auditor) usan el modelo más capaz; agentes de dominio/standards usan mid-tier; agentes rutinarios (audit, logistics, execution_auditor) usan fast/baratos. Escalación promueve FAST→BALANCED en contextos MAYOR/CRITICAL. Replica patrón v4 `contracts/models.md` v3.0. Funciona en 4 proveedores (anthropic, openai, ollama, gemini). |
+| Bug fix: `resp.tokens_used` → `resp.input_tokens + resp.output_tokens` | Corregido AttributeError latente en telemetría de `_run_bias_audit()`. `ProviderResponse` no tiene campo `tokens_used`. |
+
 ### Remaining open work
 
 | # | Task | Priority | Notes |
@@ -1960,4 +1983,4 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ~~38~~ | ~~Sub-agent recursive depth ≤ 2 (SecurityAgent context saturation)~~ | ~~LOW~~ | DONE — 86470ce. `_MAX_FRAGMENTATION_DEPTH=2` in AsyncSession. `_handle_escalation()` registered on broker for ESCALATION messages. Increments counter on CONTEXT_SATURATION; emits PROTOCOL_VIOLATION if depth > 2. |
 | ~~39~~ | ~~Spec confirmation gate (PHASE 0.2 → PHASE 1)~~ | ~~LOW~~ | DONE — 86470ce. `confirm_specs: bool = False` on `run_async()`. If True and handler.confirm() returns False → returns `AsyncSessionResult(status="spec_rejected")` before DAG build. |
 
-> **All tracked open items resolved as of session 4.** Framework structural foundation (Phases 0–1 pipeline) is complete. Next work requires defining new items based on integration testing or Phase 2+ gaps.
+> **All tracked open items resolved as of session 6.** Framework structural foundation (Phases 0–1 pipeline) + BiasAuditAgent (PHASE 1.5) + per-agent model registry complete. Next work requires defining new items based on integration testing or Phase 2+ gaps.
