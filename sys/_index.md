@@ -6,6 +6,34 @@
 
 ---
 
+## Session Branch Protocol
+
+**This rule applies to every agent and every provider without exception.**
+
+The active working branch for all framework sessions is `architect`.
+
+```
+Session start:
+    1. Verify current branch → git branch --show-current
+    2. If not on architect → git checkout architect
+    3. Proceed only after confirming branch = architect
+
+Session end (after final commit/push):
+    → git checkout architect
+```
+
+`main` is an artifact branch (product deliverables only).
+Framework files (`sdk/`, `agents/`, `contracts/`, `sys/`, `git/`) live exclusively on `architect`.
+Never commit framework work to `main`.
+
+**Gitignored files** (`.env`, `logs/`, `.piv/`, `specs/active/`, `worktrees/`, `engram/` runtime)
+are not managed by git. They persist in the working directory across branch switches
+and are accessible from any branch without any copy or port operation.
+
+For complete branch type definitions (Directive / Artifact) see `git/topology.md §Branch Types`.
+
+---
+
 ## Routing Rule
 
 After all BLOCKER checks in `sys/_verify.md` pass, every agent is routed to `sdk/`:

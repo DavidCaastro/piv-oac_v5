@@ -96,10 +96,21 @@ a human pressing the merge button after reviewing the ComplianceAgent checklist.
 ## Branch Protection Summary
 
 For complete branch protection rules, see `git/protection.md`.
+For branch type definitions (Directive / Artifact), see `git/topology.md §Branch Types`.
+For the session branch protocol, see `sys/_index.md §Session Branch Protocol`.
+
+### Directive Branches
+
+| Branch | Automated push | Force push | Product CI gates |
+|---|---|---|---|
+| `architect` | ❌ (human only) | ❌ | Not applicable |
+| `sec_ops` | ❌ (human only) | ❌ | Not applicable |
+| `piv-directive` | SDK only | ❌ | Not applicable |
+
+### Artifact Branches
 
 | Branch | Automated push | Force push | Merge without gate |
 |---|---|---|---|
 | `main` | ❌ | ❌ | ❌ (Gate 3 + human required) |
 | `staging` | ❌ | ❌ | ❌ (Gate 2b required) |
 | `feature/*` | ✅ (session agents) | ❌ | Gate 1 required for subbranch→task |
-| `piv-directive` | SDK only | ❌ | SDK managed only |
