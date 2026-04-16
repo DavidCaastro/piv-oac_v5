@@ -49,8 +49,8 @@ class ProviderRouter:
 
     def __init__(
         self,
-        cloud_provider: "BaseProvider | None" = None,
-        local_provider: "BaseProvider | None" = None,
+        cloud_provider: BaseProvider | None = None,
+        local_provider: BaseProvider | None = None,
     ) -> None:
         self._cloud = cloud_provider
         self._local = local_provider
@@ -73,7 +73,7 @@ class ProviderRouter:
 
         return self._LEVEL_DEFAULT.get(agent_level, Tier.TIER3)
 
-    def get_provider(self, tier: Tier) -> "BaseProvider | None":
+    def get_provider(self, tier: Tier) -> BaseProvider | None:
         """Return the provider instance for *tier*, or None for Tier 1."""
         if tier == Tier.TIER1:
             return None

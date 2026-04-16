@@ -88,7 +88,7 @@ class PMIAMessage:
         d.pop("signature", None)
         return json.dumps(d, sort_keys=True, ensure_ascii=False).encode()
 
-    def with_signature(self, sig: str) -> "PMIAMessage":
+    def with_signature(self, sig: str) -> PMIAMessage:
         return PMIAMessage(
             type=self.type,
             agent_id=self.agent_id,

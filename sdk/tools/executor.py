@@ -30,7 +30,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
+import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 from .filter import ExecutionDataFilter, FilterError
@@ -39,6 +40,8 @@ logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Allowlist
+# Use sys.executable for Python-based commands so PATH resolution is not
+# needed (critical on Windows where subprocess bash cannot see venv PATH).
 # ---------------------------------------------------------------------------
 
 _ALLOWED_COMMANDS: dict[str, list[str]] = {
@@ -46,8 +49,8 @@ _ALLOWED_COMMANDS: dict[str, list[str]] = {
     "worktree_remove": ["bash", "sys/bootstrap.sh", "wt:remove"],
     "worktree_list":   ["bash", "sys/bootstrap.sh", "wt:list"],
     "worktree_prune":  ["bash", "sys/bootstrap.sh", "wt:prune"],
-    "run_pytest":      ["python", "-m", "pytest"],
-    "run_lint":        ["bash", "sys/bootstrap.sh", "lint"],
+    "run_pytest":      [sys.executable, "-m", "pytest"],
+    "run_lint":        [sys.executable, "-m", "ruff", "check"],
     "validate":        ["bash", "sys/bootstrap.sh", "validate"],
 }
 
@@ -169,7 +172,7 @@ class SafeLocalExecutor:
             raw_out, raw_err = await asyncio.wait_for(
                 proc.communicate(), timeout=self._timeout
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             logger.error("[SafeLocalExecutor] timeout after %.1fs: %s", self._timeout, command)
             raise

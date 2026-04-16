@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +79,13 @@ class DAGBuilder:
     def __init__(self) -> None:
         self._nodes: dict[str, DAGNode] = {}
 
-    def add(self, node: DAGNode) -> "DAGBuilder":
+    def add(self, node: DAGNode) -> DAGBuilder:
         if node.node_id in self._nodes:
             raise DAGValidationError(f"Duplicate node_id: '{node.node_id}'")
         self._nodes[node.node_id] = node
         return self
 
-    def build(self) -> "DAG":
+    def build(self) -> DAG:
         """Validate and return the finalized DAG."""
         self._validate_references()
         order = self._topological_sort()

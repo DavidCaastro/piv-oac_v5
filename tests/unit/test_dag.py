@@ -2,7 +2,7 @@
 
 import pytest
 
-from sdk.core.dag import DAGBuilder, DAGNode, DAGValidationError, NodeStatus
+from sdk.core.dag import DAGBuilder, DAGNode, DAGValidationError
 
 
 @pytest.mark.unit

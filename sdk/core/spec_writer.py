@@ -234,7 +234,7 @@ def _inline_functional(v: dict[str, str]) -> str:
     lines = [
         f"# Functional Spec — {v['objective_short']}",
         "",
-        f"## Objective",
+        "## Objective",
         "",
         v["objective"],
         "",

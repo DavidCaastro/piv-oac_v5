@@ -43,7 +43,7 @@ def _run_bootstrap(command: str, repo: Path) -> int:
 
 def cmd_init(args: argparse.Namespace, repo: Path) -> int:
     """piv init — workspace bootstrap."""
-    from sdk.core.init import Initializer, InitError
+    from sdk.core.init import InitError, Initializer
 
     provider = getattr(args, "provider", "anthropic")
     try:
@@ -133,6 +133,7 @@ def cmd_trigger(args: argparse.Namespace, repo: Path) -> int:
 def cmd_run_async(args: argparse.Namespace, repo: Path) -> int:
     """piv run-async — start a session with true parallel PHASE 5."""
     import asyncio
+
     from sdk.core.session_async import AsyncSession
 
     provider    = getattr(args, "provider", "anthropic")
@@ -152,7 +153,7 @@ def cmd_run_async(args: argparse.Namespace, repo: Path) -> int:
           f"tokens={result.total_tokens} duration={result.duration_ms}ms")
 
     for r in result.expert_results:
-        status = "✓" if r.success else "✗"
+        status = "OK" if r.success else "FAIL"
         print(f"  {status} {r.expert_id}: {r.tokens_used} tokens, {r.duration_ms}ms")
 
     if result.warnings:

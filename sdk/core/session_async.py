@@ -22,21 +22,20 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from sdk.core.bias_validator import BiasValidationResult, validate_bias_output
 from sdk.core.dag import DAG, DAGNode, SpecDAGParser
-from sdk.core.model_registry import resolve_model
 from sdk.core.interview import (
     CallbackHandler,
     PreSuppliedHandler,
     run_interview,
 )
 from sdk.core.loader import FrameworkLoader
+from sdk.core.model_registry import resolve_model
 from sdk.core.session import CheckpointType, SessionManager
 from sdk.core.spec_writer import SpecWriter
 from sdk.engram import EngramWriter
-from sdk.gates.evaluator import GateContext, GateEvaluator, GateType, GateVerdict
+from sdk.gates.evaluator import GateEvaluator
 from sdk.metrics import TelemetryLogger
 from sdk.pmia import (
     GateId,
@@ -131,7 +130,7 @@ class AsyncSession:
         model: str | None = None,
         local_model: str | None = None,
         repo_root: Path | None = None,
-    ) -> "AsyncSession":
+    ) -> AsyncSession:
         return cls(provider=provider, model=model, local_model=local_model, repo_root=repo_root)
 
     async def run_async(
@@ -526,7 +525,7 @@ class AsyncSession:
         node_descriptions = "\n".join(
             f"- [{n.node_id}] domain={n.domain}: {n.description} "
             f"(files: {', '.join(n.files_in_scope) or 'TBD'})"
-            for n in dag.nodes
+            for n in dag.nodes.values()
         )
         user_message = (
             f"## Architectural Proposal to Audit\n\n"

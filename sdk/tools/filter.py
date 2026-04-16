@@ -11,7 +11,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-
 _BLOCKED = re.compile(
     r"\.\./|"                           # path traversal
     r"\.\.[/\\]|"                       # Windows path traversal
