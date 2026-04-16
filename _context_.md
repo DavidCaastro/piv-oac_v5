@@ -3,7 +3,7 @@
 > Living reference document. Consolidates every architectural decision, migration mapping,
 > and task status for the v5.0 build. Update STATUS as work progresses.
 >
-> Last updated: 2026-04-16 (session 6)
+> Last updated: 2026-04-16 (session 7)
 > Previous version source: https://github.com/DavidCaastro/factory/tree/agent-configs
 
 ---
@@ -1882,6 +1882,12 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `sdk/core/bias_validator.py` — Tier 1 deterministic output validator | 2026-04-16 s6 | validate_bias_output(): 6 regex checks (section header, dependency table ≥1 row, Sesgos checklist, Red Team result, Multi-LLM audit, RAG conflicts). BiasValidationResult: valid, missing_sections, warnings, red_team_result, multi_llm_result, lock_in_risks. section_present() for Gate 3 quick check. Zero LLM calls. 3-case unit test PASSED. Commit 9ef6ab5. |
 | BiasAuditAgent PHASE 1.5 wiring in session_async.py | 2026-04-16 s6 | Activates for classification.level==2 and not fast_track. _run_bias_audit(): loads bias_auditor config + bias-audit skill, LLM call (FLAGSHIP via model_registry), validate_bias_output() Tier 1. GATE_VERDICT(REJECTED)+status="bias_rejected" on fail; GATE_VERDICT(APPROVED)+CHECKPOINT_REQ on pass. Non-fatal on load/provider error. Fix resp.tokens_used → input+output. Commit 9ef6ab5. |
 | `sdk/core/model_registry.py` — per-agent model assignment | 2026-04-16 s6 | resolve_model(agent, provider, task_complexity, escalate) → model string. ModelTier: FLAGSHIP/BALANCED/FAST. 14 agents mapped. FLAGSHIP: orchestrator, security_agent, bias_auditor. BALANCED: standards, compliance, evaluation, domain_orchestrator, specialist(L2). FAST: audit, coherence, logistics, execution_auditor, docs, specialist(L1). Dynamic escalation: audit/coherence/docs FAST→BALANCED on escalate=True. 4 providers: anthropic(opus/sonnet/haiku), openai(gpt-4o/gpt-4o/mini), ollama(32b/14b/7b), gemini(flash-exp/flash/flash). Unknown provider → anthropic fallback. 20-case matrix PASSED. session_async.py: specialist + bias_auditor use registry. Commit da933d7. |
+| Shadow module fix: `anthropic.py/openai.py/ollama.py` → `entrypoint_*.py` | 2026-04-16 s7 | Provider scripts en raíz del repo tenían el mismo nombre que paquetes pip, causando ImportError circular al importar `sdk` (Python cargaba el script local en vez del paquete). Renombrados a `entrypoint_*.py`. Commits 041a768, e843c0a. |
+| `sdk/__init__.py` — optional OpenAIProvider + lint cleanup | 2026-04-16 s7 | Import de `OpenAIProvider` envuelto en try/except ImportError — setups sin `openai` instalado ya no fallan. noqa annotations en re-exports públicos intencionales (InitError, Initializer, SpecWriter, GateEvaluator). Variable F841 corregida. Commit e843c0a. |
+| `dag.nodes.values()` fix in `_run_bias_audit()` | 2026-04-16 s7 | `for n in dag.nodes` iteraba keys del dict (str) en vez de DAGNode — AttributeError en `n.node_id` en toda sesión L2. Corregido a `dag.nodes.values()`. Commit e843c0a. |
+| `SafeLocalExecutor run_lint` → `sys.executable -m ruff check` | 2026-04-16 s7 | `run_lint` llamaba `bash sys/bootstrap.sh lint` que invoca `ruff` directamente — no encontrado en PATH de bash cuando se lanza desde subprocess Python en Windows (PATH formato Windows ≠ bash). Corregido a `sys.executable` + mismo fix en `run_pytest`. Commit e843c0a. |
+| ruff lint: 47 errores saneados | 2026-04-16 s7 | 35 errores autofix (`ruff check --fix`). UP042 (`str, Enum` → `StrEnum`) añadido a ignore en pyproject.toml — intencional por compatibilidad de serialización JSON. Commit e843c0a. |
+| `sdk/cli.py` — UnicodeEncodeError fix (Windows cp1252) | 2026-04-16 s7 | `✓`/`✗` en output de expert results no encodables en consola Windows cp1252. Reemplazados por `OK`/`FAIL` ASCII. Commit e843c0a. |
 
 ### Next (ordered by priority)
 
@@ -1972,6 +1978,16 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `sdk/core/model_registry.py` — asignación de modelo por agente | Cada agente invoca el tier de modelo apropiado en lugar del global de sesión. Agentes FLAGSHIP (orchestrator, security, bias_auditor) usan el modelo más capaz; agentes de dominio/standards usan mid-tier; agentes rutinarios (audit, logistics, execution_auditor) usan fast/baratos. Escalación promueve FAST→BALANCED en contextos MAYOR/CRITICAL. Replica patrón v4 `contracts/models.md` v3.0. Funciona en 4 proveedores (anthropic, openai, ollama, gemini). |
 | Bug fix: `resp.tokens_used` → `resp.input_tokens + resp.output_tokens` | Corregido AttributeError latente en telemetría de `_run_bias_audit()`. `ProviderResponse` no tiene campo `tokens_used`. |
 
+### Impact Analysis — Session 7 (2026-04-16)
+
+| Fixed | Runtime impact |
+|---|---|
+| Shadow module collision (`anthropic.py` / `openai.py` / `ollama.py`) | `python -m sdk.cli` ahora carga sin ImportError. Causa raíz: scripts en raíz del repo tenían el mismo nombre que paquetes pip — Python los cargaba primero, rompiendo el import circular antes de que `sdk` pudiera inicializarse. |
+| `dag.nodes.values()` en `_run_bias_audit()` | PHASE 1.5 ahora itera correctamente objetos DAGNode al construir el mensaje de auditoría. Antes: AttributeError en cada sesión L2, BiasAuditAgent nunca llegaba a ejecutarse. |
+| `run_lint` vía `sys.executable` | Gate 2b lint funciona en Windows. Antes: subprocess bash desde Python no resolvía `ruff` en PATH (formato Windows incompatible con Git Bash). Gate permanentemente bloqueada. |
+| ruff lint limpio (0 errores) | `python -m ruff check sdk/ tests/` sale con código 0. Gate 2b es pasable por primera vez. 35 auto-corregidos, UP042 ignorado intencionalmente. |
+| Prueba funcional end-to-end confirmada | Primera ejecución exitosa: bootstrap 8/8 PASS → Vault OK → clasificador → PHASE 1.5 → Gate 2b (lint+pytest PASS) → PHASE 5 → `status=completed` en 15.9s. SpecialistAgent bloqueado por crédito insuficiente de API (no es error de código). |
+
 ### Remaining open work
 
 | # | Task | Priority | Notes |
@@ -1983,4 +1999,4 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ~~38~~ | ~~Sub-agent recursive depth ≤ 2 (SecurityAgent context saturation)~~ | ~~LOW~~ | DONE — 86470ce. `_MAX_FRAGMENTATION_DEPTH=2` in AsyncSession. `_handle_escalation()` registered on broker for ESCALATION messages. Increments counter on CONTEXT_SATURATION; emits PROTOCOL_VIOLATION if depth > 2. |
 | ~~39~~ | ~~Spec confirmation gate (PHASE 0.2 → PHASE 1)~~ | ~~LOW~~ | DONE — 86470ce. `confirm_specs: bool = False` on `run_async()`. If True and handler.confirm() returns False → returns `AsyncSessionResult(status="spec_rejected")` before DAG build. |
 
-> **All tracked open items resolved as of session 6.** Framework structural foundation (Phases 0–1 pipeline) + BiasAuditAgent (PHASE 1.5) + per-agent model registry complete. Next work requires defining new items based on integration testing or Phase 2+ gaps.
+> **All tracked open items resolved as of session 7.** Framework estructural completo (Phases 0–1 pipeline) + BiasAuditAgent (PHASE 1.5) + per-agent model registry + prueba funcional end-to-end confirmada. Próximo trabajo: recarga de créditos API para validar SpecialistAgent real, o nuevos ítems de integración testing / Phase 2+ gaps.
