@@ -51,14 +51,26 @@ Language: English only (no Spanish commit messages).
 
 ## Branch Naming Policy
 
+Branch types (Directive / Artifact) are defined in `git/topology.md §Branch Types`.
+This table governs naming patterns, ownership, and lifecycle only.
+
+### Directive Branches
+
+| Branch | Owner | Lifecycle |
+|---|---|---|
+| `architect` | Human (framework author) | Permanent — framework development |
+| `sec_ops` | Human (security lead) | Permanent — security contracts and gate policies |
+| `piv-directive` | SDK only | Permanent (orphan) — AuditAgent engram atoms |
+
+### Artifact Branches
+
 | Pattern | Owner | Lifecycle |
 |---|---|---|
-| `feature/<task-id>/expert-<N>` | Specialist Agent N | PHASE 5 → Gate 1 |
-| `feature/<task-id>/` | DomainOrchestrator | PHASE 5 → Gate 2b |
-| `fix/<issue-id>/` | MasterOrchestrator | Hotfix cycle |
-| `staging` | SDK / CI | Permanent |
 | `main` | Human team | Permanent |
-| `piv-directive` | SDK only | Permanent (orphan) |
+| `staging` | SDK / CI | Permanent |
+| `feature/<task-id>/` | DomainOrchestrator | PHASE 5 → Gate 2b |
+| `feature/<task-id>/expert-<N>` | Specialist Agent N | PHASE 5 → Gate 1 |
+| `fix/<issue-id>/` | MasterOrchestrator | Hotfix cycle |
 
 **Task ID format:** `<domain>-<NNN>` — e.g. `auth-001`, `payments-042`
 **Expert number:** sequential integer starting at 1 per task

@@ -4,45 +4,93 @@ Read by: `sdk/core/init.py`, `agents/domain_orchestrator.md`, `sys/_index.md`
 
 ---
 
+## Branch Types
+
+All branches in this repository belong to one of two types. This classification
+governs who may write to them, what they contain, and how they interact with
+the agent pipeline.
+
+### Directive Branches
+
+Branches that define **how the system thinks and operates**. They carry
+framework configuration, agent contracts, architectural decisions, and
+meta-level context. They are never merged into artifact branches.
+
+| Branch | Purpose |
+|---|---|
+| `architect` | Primary framework development branch. All changes to `sdk/`, `agents/`, `contracts/`, `sys/`, `git/` originate here. |
+| `sec_ops` | Security operations branch. Dedicated to SecurityAgent contracts, gate policies, and audit rules. Isolated from product branches. |
+| `piv-directive` | Orphan branch. SDK-managed only. Stores engram atoms written by AuditAgent. Never user-edited, never merged. |
+
+**Invariants for directive branches:**
+- Never merged into `main`, `staging`, or any `feature/*` branch
+- Not subject to product CI pipelines (Gate 1 / Gate 2b / Gate 3 do not apply)
+- Agents load their configs from directive branches at session start via `sdk/core/loader.py`
+- Human push allowed on `architect` and `sec_ops`; SDK-only on `piv-directive`
+
+### Artifact Branches
+
+Branches that carry **product deliverables** — code that will be tested,
+reviewed, and shipped. All agent execution (PHASE 5) happens in these branches.
+
+| Branch | Purpose |
+|---|---|
+| `main` | Stable product. Gate 3 + human-only merge. Protected: no automated push, no force push. |
+| `staging` | Integration layer. Created by `piv-oac init` if missing. Gate 2b required to merge from `feature/*`. |
+| `feature/<task-id>/` | Task integration branch. Created by DomainOrchestrator at PHASE 5. |
+| `feature/<task-id>/expert-N` | Specialist Agent worktree subbranch. |
+| `fix/<issue-id>/` | Hotfix branches. Same expert model, shorter lifecycle. |
+
+**Invariants for artifact branches:**
+- All changes flow bottom-up: `expert-N` → `feature/` → `staging` → `main`
+- No artifact branch reads from or merges directive branches
+- Gate verdicts are required at each merge boundary (see `git/protection.md`)
+
+---
+
 ## Branch Map
 
 ```
 user-repo/
 │
-├── main              ← stable product
-│                       Gate 3 + human-only merge
-│                       Protected: no automated push, no force push
+├── [directive branches — framework configuration, never merged into product]
+│   ├── architect         ← framework development (sdk/, agents/, contracts/, sys/)
+│   ├── sec_ops           ← security contracts + gate policies
+│   └── piv-directive     ← orphan — SDK-managed engram atoms only
 │
-├── staging           ← integration layer
-│                       Created by `piv-oac init` if missing
-│                       Gate 2b required to merge from feature/*
-│
-├── piv-directive     ← orphan branch — framework configs
-│                       SDK-managed only (never user-edited, never merged)
-│                       Updated only on `pip install piv-oac` (version bump)
-│
-└── [session branches — created during PHASE 5, deleted after merge]
+└── [artifact branches — product deliverables, full gate pipeline]
+    ├── main              ← stable product
+    │                       Gate 3 + human-only merge
+    │                       Protected: no automated push, no force push
     │
-    ├── feature/<task-id>/
-    │   ├── feature/<task-id>/expert-1   ← Specialist Agent 1 worktree
-    │   ├── feature/<task-id>/expert-2   ← Specialist Agent 2 worktree
-    │   └── feature/<task-id>/expert-N   ← Specialist Agent N worktree
+    ├── staging           ← integration layer
+    │                       Created by `piv-oac init` if missing
+    │                       Gate 2b required to merge from feature/*
     │
-    └── fix/<issue-id>/                  ← hotfix branches (same expert model)
+    └── [session branches — created during PHASE 5, deleted after merge]
+        │
+        ├── feature/<task-id>/
+        │   ├── feature/<task-id>/expert-1   ← Specialist Agent 1 worktree
+        │   ├── feature/<task-id>/expert-2   ← Specialist Agent 2 worktree
+        │   └── feature/<task-id>/expert-N   ← Specialist Agent N worktree
+        │
+        └── fix/<issue-id>/                  ← hotfix branches (same expert model)
 ```
 
 ---
 
 ## Branch Lifecycle
 
-| Branch | Created by | Deleted by | Trigger |
-|---|---|---|---|
-| `main` | Repo init | Never | — |
-| `staging` | `piv-oac init` | Never | First `piv-oac init` run |
-| `piv-directive` | `piv-oac init` | Never | First `piv-oac init` run |
-| `feature/<task-id>/` | DomainOrchestrator | DomainOrchestrator | After Gate 2 APPROVED |
-| `feature/<task-id>/expert-N` | DomainOrchestrator | After Gate 1 APPROVED | Expert worktree creation |
-| `fix/<issue-id>/` | MasterOrchestrator | After Gate 2b | Hotfix classification |
+| Branch | Type | Created by | Deleted by | Trigger |
+|---|---|---|---|---|
+| `main` | Artifact | Repo init | Never | — |
+| `staging` | Artifact | `piv-oac init` | Never | First `piv-oac init` run |
+| `architect` | Directive | Human (manual) | Never | Framework repo setup |
+| `sec_ops` | Directive | Human (manual) | Never | When security scope is separated |
+| `piv-directive` | Directive | `piv-oac init` | Never | First `piv-oac init` run |
+| `feature/<task-id>/` | Artifact | DomainOrchestrator | DomainOrchestrator | After Gate 2 APPROVED |
+| `feature/<task-id>/expert-N` | Artifact | DomainOrchestrator | After Gate 1 APPROVED | Expert worktree creation |
+| `fix/<issue-id>/` | Artifact | MasterOrchestrator | After Gate 2b | Hotfix classification |
 
 **feature/ branches and worktrees are NOT created at init.**
 They are created by Domain Orchestrators during PHASE 5 as the DAG requires them.

@@ -9,13 +9,24 @@ They are enforced by GitHub — not by the SDK or CI workflows.
 
 ## Protection Matrix
 
+Branch type definitions (Directive / Artifact) are in `git/topology.md §Branch Types`.
+
+### Directive Branches
+
+| Branch | Direct push | Force push | Delete | Require PR | Required approvals | CI gates required |
+|---|---|---|---|---|---|---|
+| `architect` | ✅ (human only) | ❌ | ❌ | ❌ | — | None (product CI does not apply) |
+| `sec_ops` | ✅ (human only) | ❌ | ❌ | ❌ | — | None (product CI does not apply) |
+| `piv-directive` | ❌ (SDK token only) | ❌ | ❌ | ❌ | — | None |
+
+### Artifact Branches
+
 | Branch | Direct push | Force push | Delete | Require PR | Required approvals | CI gates required |
 |---|---|---|---|---|---|---|
 | `main` | ❌ | ❌ | ❌ | ✅ | 1 human | Gate 3 (`staging-gate.yml`) |
 | `staging` | ❌ | ❌ | ❌ | ✅ | 0 human | Gate 2b (`gate2b.yml`) |
 | `feature/*` | ✅ (session agents only) | ❌ | ✅ (by SDK) | ✅ (subbranch→task) | 0 human | Gate 1 (`pre-merge.yml`) |
 | `fix/*` | ✅ (session agents only) | ❌ | ✅ (by SDK) | ✅ | 0 human | Gate 1 (`pre-merge.yml`) |
-| `piv-directive` | ❌ (SDK token only) | ❌ | ❌ | ❌ | — | None |
 
 ---
 

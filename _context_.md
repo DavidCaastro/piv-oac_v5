@@ -1696,7 +1696,23 @@ Governs agent isolation during PHASE 5 parallel execution.
 
 ## 23. Rescued Content: Branch & Worktree Protocol
 
-### Branch Topology
+### Branch Taxonomy
+
+All branches belong to one of two types. Authoritative definition: `git/topology.md §Branch Types`.
+
+**Directive branches** — carry framework configuration, agent contracts, and meta-level context.
+Never merged into product branches. Product CI pipelines do not apply.
+
+| Branch | Purpose |
+|---|---|
+| `architect` | Framework development (`sdk/`, `agents/`, `contracts/`, `sys/`) |
+| `sec_ops` | Security contracts and gate policies |
+| `piv-directive` | Orphan — SDK-managed AuditAgent engram atoms |
+
+**Artifact branches** — carry product deliverables. Full gate pipeline applies.
+`main` ← `staging` ← `feature/<task-id>/` ← `feature/<task-id>/expert-N`
+
+### Branch Topology (Artifact)
 
 ```
 main                              (delivery — Gate 3, human-only merge)
@@ -1710,11 +1726,14 @@ main                              (delivery — Gate 3, human-only merge)
 
 ### Branch Protection
 
-| Branch | Rule | Notes |
-|---|---|---|
-| `main` | Owner-only push, no force push | Unreachable by automation |
-| `staging` | Owner-only, no force push | Gate 3 required for merge |
-| `feature/*` | Owner + session agents | Created and deleted per session |
+| Branch | Type | Rule | Notes |
+|---|---|---|---|
+| `architect` | Directive | Human push only, no force push | Product CI does not apply |
+| `sec_ops` | Directive | Human push only, no force push | Product CI does not apply |
+| `piv-directive` | Directive | SDK token only | No PR, no CI |
+| `main` | Artifact | Owner-only push, no force push | Unreachable by automation |
+| `staging` | Artifact | Owner-only, no force push | Gate 3 required for merge |
+| `feature/*` | Artifact | Owner + session agents | Created and deleted per session |
 
 ### Worktree Lifecycle Commands
 
