@@ -256,7 +256,8 @@ class AsyncSession:
 
             # PHASE 1.5 — BiasAuditAgent (L2 tasks only, Tier 1 validator enforced)
             # Runs AFTER DAG confirmed, BEFORE experts execute.
-            # Gate: APPROVED continues to PHASE 5; REJECTED returns early.
+            # Gate: APPROVED continues to PHASE 3; REJECTED returns early.
+            bias_output = ""
             if classification.level == 2 and not classification.fast_track:
                 bias_approved, bias_output, bias_missing = await self._run_bias_audit(
                     session_id, active_dag, objective, classification
@@ -278,6 +279,25 @@ class AsyncSession:
                         gate_verdicts=gate_verdicts,
                         duration_ms=_now_ms() - start_ms,
                         warnings=["BiasAudit REJECTED: " + "; ".join(bias_missing)],
+                    )
+                    return _result_for_index
+
+            # PHASE 3 — SecurityAgent Gate 0 (L2 non-fast-track only)
+            # Sole evaluator for L2 tasks. REJECTED halts before any LLM cost in PHASE 5.
+            if classification.level == 2 and not classification.fast_track:
+                sec_approved, sec_rationale = await self._run_security_gate(
+                    session_id, active_dag, objective, bias_output
+                )
+                gate_verdicts["GATE_0"] = "APPROVED" if sec_approved else "REJECTED"
+                if not sec_approved:
+                    self._session_mgr.close(session_id, status="failed")  # type: ignore
+                    _result_for_index = AsyncSessionResult(
+                        session_id=session_id,
+                        objective=objective,
+                        status="security_rejected",
+                        gate_verdicts=gate_verdicts,
+                        duration_ms=_now_ms() - start_ms,
+                        warnings=[f"SecurityAgent Gate 0 REJECTED: {sec_rationale}"],
                     )
                     return _result_for_index
 
@@ -347,6 +367,32 @@ class AsyncSession:
                         f"tokens_so_far={total_tokens} failures={consecutive_rejections}."
                     ),
                 ))
+
+            # PHASE 6 — EvaluationAgent scoring (non-blocking, advisory)
+            eval_scores = await self._run_evaluation(
+                session_id, all_expert_results, objective
+            )
+            total_tokens += sum(s.get("tokens_used", 0) for s in eval_scores)
+
+            # PHASE 7 — CoherenceAgent Gate 1
+            # Blocking for multi-node DAGs; advisory for single-node.
+            coh_approved, coh_rationale = await self._run_coherence_gate(
+                session_id, all_expert_results, objective, active_dag, eval_scores
+            )
+            gate_verdicts["GATE_1"] = "APPROVED" if coh_approved else "REJECTED"
+            if not coh_approved:
+                self._session_mgr.close(session_id, status="failed")  # type: ignore
+                _result_for_index = AsyncSessionResult(
+                    session_id=session_id,
+                    objective=objective,
+                    status="coherence_rejected",
+                    expert_results=all_expert_results,
+                    gate_verdicts=gate_verdicts,
+                    total_tokens=total_tokens,
+                    duration_ms=_now_ms() - start_ms,
+                    warnings=[f"CoherenceAgent Gate 1 REJECTED: {coh_rationale}"],
+                )
+                return _result_for_index
 
             # GATE 2b — lint + pytest MUST pass before closure (Tier 1, blocking)
             lint_result = await self._executor.run("run_lint")
@@ -632,6 +678,356 @@ class AsyncSession:
         return validation.valid, output_text, validation.missing_sections
 
     # ------------------------------------------------------------------
+    # SecurityAgent — PHASE 3 (Gate 0 for L2 tasks)
+    # ------------------------------------------------------------------
+
+    async def _run_security_gate(
+        self,
+        session_id: str,
+        dag: DAG,
+        objective: str,
+        bias_summary: str,
+    ) -> tuple[bool, str]:
+        """Invoke SecurityAgent as Gate 0 evaluator for L2 architectural tasks.
+
+        REJECTED halts the session and writes a finding to
+        engram/security/<session_id>/finding.md.
+
+        Returns:
+            tuple(approved: bool, rationale: str)
+        """
+        self._log(session_id, "PHASE_3", "security_gate_start", "OK", 1, 0,
+                  {"dag_nodes": len(dag.nodes)})
+
+        try:
+            agent_cfg = self._loader.load_agent("security_agent")
+        except (FileNotFoundError, PermissionError) as exc:
+            self._log(session_id, "PHASE_3", "security_gate_load_error", "WARN", 1, 0,
+                      {"error": str(exc)})
+            return True, "security_agent config missing — gate skipped"
+
+        node_descriptions = "\n".join(
+            f"- [{n.node_id}] domain={n.domain}: {n.description}"
+            for n in dag.nodes.values()
+        )
+        user_message = (
+            f"## Gate 0 Security Review\n\n"
+            f"**Objective:** {objective}\n\n"
+            f"**DAG nodes ({len(dag.nodes)}):**\n{node_descriptions}\n\n"
+            f"**BiasAudit summary:** {bias_summary[:400] if bias_summary else 'not run'}\n\n"
+            f"Evaluate this architectural proposal for security risks. Check: injection "
+            f"patterns, credential exposure, isolation violations, gate bypass risk, "
+            f"manifest integrity.\n\n"
+            f"End your response with exactly one of:\n"
+            f"GATE_VERDICT: APPROVED\n"
+            f"GATE_VERDICT: REJECTED — <reason max 100 tokens>"
+        )
+
+        provider = self._router.get_provider(self._router.resolve_tier("L1"))
+        sec_model = resolve_model("security_agent", self._provider_name)
+
+        output_text = ""
+        if provider is not None:
+            try:
+                req = ProviderRequest(
+                    system=(
+                        f"{agent_cfg.agent_md}\n\n"
+                        f"--- CONTRACT ---\n{agent_cfg.contract_md}\n\n"
+                        f"--- BASE CONTRACT ---\n{agent_cfg.base_md}"
+                    ),
+                    messages=[{"role": "user", "content": user_message}],
+                    model=sec_model,
+                    max_tokens=1024,
+                )
+                resp: ProviderResponse = await provider.complete(req)
+                output_text = resp.content
+                self._log(session_id, "PHASE_3", "security_gate_llm", "OK",
+                          resp.input_tokens + resp.output_tokens, resp.output_tokens,
+                          {"model": resp.model})
+            except Exception as exc:  # noqa: BLE001
+                self._log(session_id, "PHASE_3", "security_gate_llm_error", "WARN", 1, 0,
+                          {"error": str(exc)[:200]})
+                return True, "LLM call failed — gate skipped"
+        else:
+            self._log(session_id, "PHASE_3", "security_gate_no_provider", "WARN", 1, 0, {})
+            return True, "no provider available — gate skipped"
+
+        approved  = _parse_verdict(output_text)
+        rationale = _extract_rationale(output_text)
+
+        if not approved:
+            try:
+                self._engram.append(
+                    f"security/{session_id}/finding.md",
+                    f"## Security Gate Rejection — {_iso_now()}\n\n"
+                    f"**Objective:** {objective[:200]}\n\n"
+                    f"**Rationale:** {rationale}\n\n"
+                    f"**Full output:**\n{output_text[:3000]}\n",
+                    session_id,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+        self._broker.send(gate_verdict(
+            agent_id="SecurityAgent",
+            session_id=session_id,
+            gate=GateId.GATE_0,
+            verdict=Verdict.APPROVED if approved else Verdict.REJECTED,
+            rationale=rationale,
+        ))
+        self._log(session_id, "PHASE_3", "security_gate_verdict",
+                  "APPROVED" if approved else "REJECTED", 1, 0,
+                  {"rationale": rationale[:100]})
+        self._broker.send(checkpoint_req(
+            agent_id="SecurityAgent",
+            session_id=session_id,
+            phase="PHASE_3",
+            state_summary=(
+                f"Gate 0 {'APPROVED' if approved else 'REJECTED'}. {rationale[:100]}"
+            ),
+        ))
+        return approved, rationale
+
+    # ------------------------------------------------------------------
+    # EvaluationAgent — PHASE 6 (post-PHASE 5, non-blocking)
+    # ------------------------------------------------------------------
+
+    async def _run_evaluation(
+        self,
+        session_id: str,
+        expert_results: list[ExpertResult],
+        objective: str,
+    ) -> list[dict]:
+        """Score each successful SpecialistAgent output using EvaluationAgent.
+
+        Non-blocking: errors are logged but never halt the pipeline.
+        Scores written to engram/metrics/logs_scores/<session_id>.jsonl.
+
+        Returns:
+            list of score dicts (one per successful expert, may be empty).
+        """
+        import json as _json
+
+        successful = [r for r in expert_results if r.success and r.content]
+        if not successful:
+            self._log(session_id, "PHASE_6", "evaluation_skip", "OK", 1, 0,
+                      {"reason": "no_successful_experts"})
+            return []
+
+        self._log(session_id, "PHASE_6", "evaluation_start", "OK", 1, 0,
+                  {"expert_count": len(successful)})
+
+        try:
+            agent_cfg = self._loader.load_agent("evaluation_agent")
+            skill_cfg = self._loader.load_skill("evaluation-rubric")
+        except (FileNotFoundError, PermissionError) as exc:
+            self._log(session_id, "PHASE_6", "evaluation_load_error", "WARN", 1, 0,
+                      {"error": str(exc)})
+            return []
+
+        system_prompt = (
+            f"{agent_cfg.agent_md}\n\n"
+            f"--- CONTRACT ---\n{agent_cfg.contract_md}\n\n"
+            f"--- BASE CONTRACT ---\n{agent_cfg.base_md}\n\n"
+            f"--- EVALUATION RUBRIC ---\n{skill_cfg.content}"
+        )
+
+        provider  = self._router.get_provider(self._router.resolve_tier("L1"))
+        eval_model = resolve_model("evaluation_agent", self._provider_name)
+
+        all_scores: list[dict] = []
+
+        for result in successful:
+            try:
+                user_message = (
+                    f"## Expert Output to Evaluate\n\n"
+                    f"**Objective:** {objective}\n\n"
+                    f"**Expert:** {result.expert_id}\n\n"
+                    f"**Output:**\n{result.content[:4000]}\n\n"
+                    f"Score this output on FUNC, SEC, QUAL, COH, FOOT (0.0–1.0 each). "
+                    f"Return a JSON block:\n"
+                    f"```json\n"
+                    f'{{"expert_id": "{result.expert_id}", '
+                    f'"scores": {{"FUNC": 0.0, "SEC": 0.0, "QUAL": 0.0, '
+                    f'"COH": 0.0, "FOOT": 0.0}}, "aggregate": 0.0, '
+                    f'"rationale": "..."}}\n'
+                    f"```"
+                )
+                req = ProviderRequest(
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_message}],
+                    model=eval_model,
+                    max_tokens=512,
+                )
+                resp: ProviderResponse = await provider.complete(req)
+                score_entry = _parse_eval_scores(resp.content, result.expert_id, session_id)
+                score_entry["tokens_used"] = resp.input_tokens + resp.output_tokens
+                all_scores.append(score_entry)
+                self._log(session_id, "PHASE_6", "evaluation_scored", "OK",
+                          resp.input_tokens + resp.output_tokens, resp.output_tokens,
+                          {"expert_id": result.expert_id,
+                           "aggregate": score_entry.get("aggregate", 0.0)})
+            except Exception as exc:  # noqa: BLE001
+                self._log(session_id, "PHASE_6", "evaluation_error", "WARN", 1, 0,
+                          {"expert_id": result.expert_id, "error": str(exc)[:200]})
+
+        if all_scores:
+            try:
+                scores_content = "\n".join(
+                    _json.dumps(s, ensure_ascii=False) for s in all_scores
+                )
+                self._engram.append(
+                    f"metrics/logs_scores/{session_id}.jsonl",
+                    scores_content,
+                    session_id,
+                )
+            except Exception:  # noqa: BLE001
+                pass
+            self._broker.send(checkpoint_req(
+                agent_id="EvaluationAgent",
+                session_id=session_id,
+                phase="PHASE_6",
+                state_summary=(
+                    f"Scored {len(all_scores)} expert(s). "
+                    f"Written to engram/metrics/logs_scores/."
+                ),
+            ))
+
+        return all_scores
+
+    # ------------------------------------------------------------------
+    # CoherenceAgent — PHASE 7 (Gate 1)
+    # ------------------------------------------------------------------
+
+    async def _run_coherence_gate(
+        self,
+        session_id: str,
+        expert_results: list[ExpertResult],
+        objective: str,
+        dag: DAG,
+        eval_scores: list[dict],
+    ) -> tuple[bool, str]:
+        """Invoke CoherenceAgent as Gate 1 evaluator.
+
+        Single-node DAG: REJECTED is advisory (pipeline continues with warning).
+        Multi-node DAG: REJECTED is blocking.
+
+        Returns:
+            tuple(effective_approved: bool, rationale: str)
+        """
+        successful = [r for r in expert_results if r.success and r.content]
+        if not successful:
+            self._log(session_id, "PHASE_7", "coherence_gate_skip", "OK", 1, 0,
+                      {"reason": "no_successful_experts"})
+            return True, "no experts to evaluate"
+
+        self._log(session_id, "PHASE_7", "coherence_gate_start", "OK", 1, 0,
+                  {"expert_count": len(successful), "nodes": len(dag.nodes)})
+
+        try:
+            agent_cfg = self._loader.load_agent("coherence_agent")
+            skill_cfg = self._loader.load_skill("evaluation-rubric")
+        except (FileNotFoundError, PermissionError) as exc:
+            self._log(session_id, "PHASE_7", "coherence_gate_load_error", "WARN", 1, 0,
+                      {"error": str(exc)})
+            return True, "coherence_agent config missing — gate skipped"
+
+        outputs_summary = "\n\n---\n\n".join(
+            f"**Expert {r.expert_id}:**\n{r.content[:2000]}"
+            for r in successful
+        )
+        scores_summary = ""
+        if eval_scores:
+            scores_summary = "\n\n**EvaluationAgent scores:**\n" + "\n".join(
+                f"- {s.get('expert_id', '?')}: aggregate={s.get('aggregate', '?')}"
+                for s in eval_scores
+            )
+
+        user_message = (
+            f"## Gate 1 Coherence Review\n\n"
+            f"**Objective:** {objective}\n\n"
+            f"**Expert outputs ({len(successful)}):**\n\n"
+            f"{outputs_summary}"
+            f"{scores_summary}\n\n"
+            f"Evaluate semantic consistency across outputs. Check: naming collisions, "
+            f"semantic contradictions, interface conflicts, coherence with objective.\n\n"
+            f"End with exactly one of:\n"
+            f"GATE_VERDICT: APPROVED\n"
+            f"GATE_VERDICT: REJECTED — <reason max 100 tokens>"
+        )
+
+        provider  = self._router.get_provider(self._router.resolve_tier("L1"))
+        coh_model = resolve_model("coherence_agent", self._provider_name)
+
+        output_text = ""
+        if provider is not None:
+            try:
+                req = ProviderRequest(
+                    system=(
+                        f"{agent_cfg.agent_md}\n\n"
+                        f"--- CONTRACT ---\n{agent_cfg.contract_md}\n\n"
+                        f"--- BASE CONTRACT ---\n{agent_cfg.base_md}\n\n"
+                        f"--- EVALUATION RUBRIC ---\n{skill_cfg.content}"
+                    ),
+                    messages=[{"role": "user", "content": user_message}],
+                    model=coh_model,
+                    max_tokens=1024,
+                )
+                resp: ProviderResponse = await provider.complete(req)
+                output_text = resp.content
+                self._log(session_id, "PHASE_7", "coherence_gate_llm", "OK",
+                          resp.input_tokens + resp.output_tokens, resp.output_tokens,
+                          {"model": resp.model})
+            except Exception as exc:  # noqa: BLE001
+                self._log(session_id, "PHASE_7", "coherence_gate_llm_error", "WARN", 1, 0,
+                          {"error": str(exc)[:200]})
+                return True, "LLM call failed — gate skipped"
+        else:
+            self._log(session_id, "PHASE_7", "coherence_gate_no_provider", "WARN", 1, 0, {})
+            return True, "no provider available — gate skipped"
+
+        approved      = _parse_verdict(output_text)
+        rationale     = _extract_rationale(output_text)
+        multi_node    = len(dag.nodes) > 1
+        # Single-node: advisory (not hard gate per contract for single-expert case)
+        eff_approved  = approved or not multi_node
+
+        self._broker.send(gate_verdict(
+            agent_id="CoherenceAgent",
+            session_id=session_id,
+            gate=GateId.GATE_1,
+            verdict=Verdict.APPROVED if approved else Verdict.REJECTED,
+            rationale=rationale,
+        ))
+        self._log(session_id, "PHASE_7", "coherence_gate_verdict",
+                  "APPROVED" if approved else "REJECTED", 1, 0,
+                  {"rationale": rationale[:100], "multi_node": multi_node,
+                   "blocking": not eff_approved})
+
+        advisory = " (advisory — single-node)" if not approved and not multi_node else ""
+        verdict_str = "APPROVED" if approved else f"REJECTED ({rationale[:80]})"
+        try:
+            self._engram.append(
+                "gates/verdicts.md",
+                f"## Gate 1 — {session_id[:8]} — {_iso_now()}{advisory}\n\n"
+                f"- **GATE_1 (CoherenceAgent)**: {verdict_str}\n",
+                session_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        self._broker.send(checkpoint_req(
+            agent_id="CoherenceAgent",
+            session_id=session_id,
+            phase="PHASE_7",
+            state_summary=(
+                f"Gate 1 {'APPROVED' if approved else 'REJECTED'}. "
+                f"multi_node={multi_node} blocking={not eff_approved}."
+            ),
+        ))
+        return eff_approved, rationale
+
+    # ------------------------------------------------------------------
     # Parallel specialist execution
     # ------------------------------------------------------------------
 
@@ -846,6 +1242,75 @@ def _now_ms() -> int:
 def _iso_now() -> str:
     import time as _t
     return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
+
+
+def _parse_verdict(text: str) -> bool:
+    """Parse APPROVED/REJECTED from an agent LLM output. Default: APPROVED.
+
+    Looks for: GATE_VERDICT: APPROVED|REJECTED, then standalone REJECTED line.
+    """
+    import re
+    m = re.search(r"GATE_VERDICT\s*:\s*(APPROVED|REJECTED)", text, re.IGNORECASE)
+    if m:
+        return m.group(1).upper() == "APPROVED"
+    if re.search(r"^\s*REJECTED\b", text, re.IGNORECASE | re.MULTILINE):
+        return False
+    return True  # default: approved when verdict unclear (non-fatal)
+
+
+def _extract_rationale(text: str) -> str:
+    """Extract the inline rationale after GATE_VERDICT: REJECTED — <reason>."""
+    import re
+    m = re.search(
+        r"GATE_VERDICT\s*:\s*(?:APPROVED|REJECTED)\s*[—\-]?\s*(.+?)(?:\n|$)",
+        text, re.IGNORECASE,
+    )
+    if m:
+        return m.group(1).strip()[:200]
+    return text[:200].replace("\n", " ")
+
+
+def _parse_eval_scores(text: str, expert_id: str, session_id: str) -> dict:
+    """Extract JSON scores block from EvaluationAgent LLM output.
+
+    Expects a ```json ... ``` block with keys: scores.{FUNC,SEC,QUAL,COH,FOOT}.
+    Falls back to a zero-score entry with parse_error=True on any failure.
+    """
+    import json as _json
+    import re
+
+    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        try:
+            data = _json.loads(m.group(1))
+            scores = data.get("scores", {})
+            aggregate = round(
+                scores.get("FUNC", 0) * 0.35
+                + scores.get("SEC", 0) * 0.25
+                + scores.get("QUAL", 0) * 0.20
+                + scores.get("COH", 0) * 0.15
+                + scores.get("FOOT", 0) * 0.05,
+                3,
+            )
+            return {
+                "session_id":   session_id,
+                "expert_id":    expert_id,
+                "phase":        "PHASE_6",
+                "scores":       scores,
+                "aggregate":    aggregate,
+                "timestamp_ms": _now_ms(),
+            }
+        except (ValueError, KeyError):
+            pass
+    return {
+        "session_id":   session_id,
+        "expert_id":    expert_id,
+        "phase":        "PHASE_6",
+        "scores":       {},
+        "aggregate":    0.0,
+        "parse_error":  True,
+        "timestamp_ms": _now_ms(),
+    }
 
 
 def _build_index_entry(
