@@ -52,3 +52,18 @@ If the objective refers to the framework files themselves → Mode B.
 
 For framework context and architecture: [`_init_.md`](_init_.md)
 For build decisions and task status: [`_context_.md`](_context_.md)
+
+---
+
+## Branch Protocol
+
+**Active working branch: `architect`**
+
+- At the **start** of every session: verify current branch. If not on `architect`, run `git checkout architect` before any other action.
+- At the **end** of every session (after final commit/push): return to `architect`.
+- `main` is an artifact branch (product deliverables only). Never commit framework work to `main`.
+- Framework files (`sdk/`, `agents/`, `contracts/`, `sys/`, `git/`) only exist on `architect`. Do not create or modify them while on `main`.
+
+**Gitignored files** (`.env`, `logs/`, `.piv/`, `specs/active/`, `worktrees/`, `engram/` runtime)
+are not managed by git and persist across branch switches automatically.
+They remain in the working directory regardless of which branch is checked out.
