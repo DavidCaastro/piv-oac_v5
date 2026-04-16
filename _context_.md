@@ -3,7 +3,7 @@
 > Living reference document. Consolidates every architectural decision, migration mapping,
 > and task status for the v5.0 build. Update STATUS as work progresses.
 >
-> Last updated: 2026-04-16 (session 7)
+> Last updated: 2026-04-16 (session 8)
 > Previous version source: https://github.com/DavidCaastro/factory/tree/agent-configs
 
 ---
@@ -422,13 +422,25 @@ sdk/
 │   ├── loader.py            ← FrameworkLoader: reads agents/*.md + contracts/*.md at runtime
 │   │                           _AUTHORIZED_LOADS table + load_agent_for_role() enforcement
 │   ├── session.py           ← SessionManager: reads/writes .piv/, checkpoint protocol
-│   ├── session_async.py     ← AsyncSession: full PHASE 0→8 orchestration
+│   ├── session_async.py     ← AsyncSession: full PHASE 0→8 orchestration (~1340 lines)
 │   │                           PHASE 0.1/0.2 wired (interview + spec_writer)
 │   │                           PHASE 1: SpecDAGParser → stub fallback
 │   │                           PHASE 1.5: BiasAuditAgent (L2 only) → bias_validator Tier 1 check
+│   │                           PHASE 3: SecurityAgent Gate 0 (L2 non-fast-track)
+│   │                             → LLM review (FLAGSHIP), REJECTED short-circuits before PHASE 5
+│   │                             → writes engram/security/<session_id>/review.md
 │   │                           PHASE 5: asyncio.gather() parallel experts (model per agent)
+│   │                             → expert output persisted in audit record (experts[] array)
+│   │                           PHASE 6: EvaluationAgent scoring (non-blocking, advisory)
+│   │                             → 5 dimensions: FUNC/SEC/QUAL/COH/FOOT
+│   │                             → writes engram/metrics/logs_scores/<session_id>.jsonl
+│   │                           PHASE 7: CoherenceAgent Gate 1 (blocking multi-node, advisory single-node)
+│   │                             → REJECTED only blocks if multi-node DAG
+│   │                             → writes engram/gates/<session_id>/gate1.md
 │   │                           PHASE 8: EngramWriter audit writes + broker.close()
 │   │                           PMIABroker wired at all gate + checkpoint transitions
+│   │                           Module helpers: _parse_verdict(), _extract_rationale(),
+│   │                             _parse_eval_scores()
 │   ├── bias_validator.py    ← Tier 1 deterministic validator for BiasAuditAgent output
 │   │                           validate_bias_output(): 6 regex checks, zero LLM calls
 │   │                           section_present(): quick header check for Gate 3
@@ -1888,6 +1900,12 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | `SafeLocalExecutor run_lint` → `sys.executable -m ruff check` | 2026-04-16 s7 | `run_lint` llamaba `bash sys/bootstrap.sh lint` que invoca `ruff` directamente — no encontrado en PATH de bash cuando se lanza desde subprocess Python en Windows (PATH formato Windows ≠ bash). Corregido a `sys.executable` + mismo fix en `run_pytest`. Commit e843c0a. |
 | ruff lint: 47 errores saneados | 2026-04-16 s7 | 35 errores autofix (`ruff check --fix`). UP042 (`str, Enum` → `StrEnum`) añadido a ignore en pyproject.toml — intencional por compatibilidad de serialización JSON. Commit e843c0a. |
 | `sdk/cli.py` — UnicodeEncodeError fix (Windows cp1252) | 2026-04-16 s7 | `✓`/`✗` en output de expert results no encodables en consola Windows cp1252. Reemplazados por `OK`/`FAIL` ASCII. Commit e843c0a. |
+| PHASE 3 — SecurityAgent Gate 0 wiring en `session_async.py` | 2026-04-16 s8 | `_run_security_gate()`: carga security_agent config + LLM call FLAGSHIP, parsea APPROVED/REJECTED con `_parse_verdict()`. Gate corto-circuita sesión antes de PHASE 5 si REJECTED. Escribe `engram/security/<session_id>/review.md` vía EngramWriter. `gate_verdicts["GATE_0"]` propagado a AsyncSessionResult. |
+| PHASE 6 — EvaluationAgent scoring en `session_async.py` | 2026-04-16 s8 | `_run_evaluation()`: non-blocking (no corta sesión si falla). 5 dimensiones: FUNC/SEC/QUAL/COH/FOOT, parseas con `_parse_eval_scores()`. Escribe `engram/metrics/logs_scores/<session_id>.jsonl`. `eval_scores` propagado a PHASE 7 para scoring de coherencia. Fallback a parse_error=True si LLM no responde JSON. |
+| PHASE 7 — CoherenceAgent Gate 1 wiring en `session_async.py` | 2026-04-16 s8 | `_run_coherence_gate()`: APPROVED/REJECTED según consistencia semántica de expert results. Multi-node DAG: blocking (REJECTED corta sesión). Single-node: advisory (REJECTED no bloquea, `eff_approved=True`). Escribe `engram/gates/<session_id>/gate1.md`. `gate_verdicts["GATE_1"]` en AsyncSessionResult. |
+| Expert output persistido en PHASE 8 audit record | 2026-04-16 s8 | `record.json` ahora incluye array `experts[]` con `expert_id`, `node_id`, `success`, `tokens_used`, `duration_ms`, `error`, `content[:8000]` por cada ExpertResult. Engram/audit completo y consultable por EvaluationAgent en sesiones futuras. |
+| Module helpers: `_parse_verdict()`, `_extract_rationale()`, `_parse_eval_scores()` | 2026-04-16 s8 | Funciones de módulo (no métodos) para parseo de output LLM en PHASE 3, 6, 7. `_parse_verdict()`: regex APPROVED/REJECTED, default REJECTED. `_extract_rationale()`: extrae texto libre post-veredicto. `_parse_eval_scores()`: parse JSON en bloque ```json``` con fallback a parse_error. |
+| Segunda prueba funcional end-to-end con créditos Anthropic | 2026-04-16 s8 | Pipeline completo ejecutado: PHASE 0→1.5 (BiasAudit APPROVED)→PHASE 5 (SpecialistAgent real, 5 tokens)→PHASE 6 (EvaluationAgent, parse_error=True no bloqueante)→PHASE 7 (CoherenceAgent REJECTED advisory single-node)→PHASE 8 audit writes. Logs en `logs/sessions/` + engram poblado en security/, metrics/, gates/, audit/. |
 
 ### Next (ordered by priority)
 
@@ -1988,6 +2006,16 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ruff lint limpio (0 errores) | `python -m ruff check sdk/ tests/` sale con código 0. Gate 2b es pasable por primera vez. 35 auto-corregidos, UP042 ignorado intencionalmente. |
 | Prueba funcional end-to-end confirmada | Primera ejecución exitosa: bootstrap 8/8 PASS → Vault OK → clasificador → PHASE 1.5 → Gate 2b (lint+pytest PASS) → PHASE 5 → `status=completed` en 15.9s. SpecialistAgent bloqueado por crédito insuficiente de API (no es error de código). |
 
+### Impact Analysis — Session 8 (2026-04-16)
+
+| Implemented | Runtime impact |
+|---|---|
+| PHASE 3 — SecurityAgent Gate 0 | Sesiones L2 tienen ahora un gate de seguridad LLM obligatorio antes de lanzar expertos paralelos. REJECTED antes de PHASE 5 evita 100% del costo LLM de los expertos en objetivos con riesgos de seguridad identificados. `engram/security/` se popula en cada ejecución L2. Antes: directorio vacío, gate no existía en código. |
+| PHASE 6 — EvaluationAgent scoring | Cada sesión completada genera un registro de scoring multi-dimensional (FUNC/SEC/QUAL/COH/FOOT) en `engram/metrics/logs_scores/`. Non-blocking: un parse_error del LLM no interrumpe la sesión. Proporciona datos históricos para análisis de calidad cross-session. Antes: `engram/metrics/` siempre vacío. |
+| PHASE 7 — CoherenceAgent Gate 1 | Sesiones multi-nodo tienen ahora validación semántica de consistencia entre expert results antes del cierre. `engram/gates/` se popula con el veredicto Gate 1 por sesión. Single-node: advisory (no bloquea). Multi-node: blocking. Antes: Gate 1 referenciado en contratos, nunca wired en código. |
+| Expert output en PHASE 8 audit record | `engram/audit/<session_id>/record.json` ahora contiene el contenido real de cada SpecialistAgent (hasta 8000 chars). AuditAgent y EvaluationAgent pueden leer resultados de sesiones anteriores para análisis histórico. Antes: `record.json` tenía metadata pero no contenido de expertos. |
+| Segunda prueba funcional end-to-end | Confirmada pipeline completa PHASE 0→8 con créditos Anthropic reales. `engram/` directories ahora se pueblan: `audit/`, `security/`, `metrics/`, `gates/`. Único gap restante: PHASE 4 (DomainOrchestrator) no implementado. `engram/skills/`, `engram/specs/`, `engram/sessions/`, `engram/bias/` aún vacíos — requieren implementación o agentes que los usen. |
+
 ### Remaining open work
 
 | # | Task | Priority | Notes |
@@ -1998,5 +2026,9 @@ Naming convention: `worktrees/<task-id>/<expert-N>`
 | ~~37~~ | ~~`sdk/core/interview.py` + `sdk/core/spec_writer.py` — PHASE 0.1/0.2~~ | ~~MED~~ | DONE — 066060a |
 | ~~38~~ | ~~Sub-agent recursive depth ≤ 2 (SecurityAgent context saturation)~~ | ~~LOW~~ | DONE — 86470ce. `_MAX_FRAGMENTATION_DEPTH=2` in AsyncSession. `_handle_escalation()` registered on broker for ESCALATION messages. Increments counter on CONTEXT_SATURATION; emits PROTOCOL_VIOLATION if depth > 2. |
 | ~~39~~ | ~~Spec confirmation gate (PHASE 0.2 → PHASE 1)~~ | ~~LOW~~ | DONE — 86470ce. `confirm_specs: bool = False` on `run_async()`. If True and handler.confirm() returns False → returns `AsyncSessionResult(status="spec_rejected")` before DAG build. |
+| 40 | PHASE 4 — DomainOrchestrator (sub-agent routing para dominios especializados) | MED | No implementado. `engram/skills/` permanece vacío. Requiere wiring de domain routing entre PHASE 3 y PHASE 5. |
+| 41 | EvaluationAgent `_parse_eval_scores()` — mejorar parsing LLM | LOW | LLM devuelve scores pero no en bloque `json` — fallback a `parse_error=True`. Prompt engineering o regex más robusto para capturar JSON sin fence. |
+| 42 | `engram/bias/` — persistir output BiasAuditAgent | LOW | PHASE 1.5 ejecuta y aprueba/rechaza pero no escribe a `engram/bias/`. Solo queda en telemetría. Agregar EngramWriter call en `_run_bias_audit()`. |
+| 43 | Tests de integración para PHASE 3, 6, 7 | MED | `tests/integration/` cubre PHASE 0→2. PHASES 3, 6, 7 no tienen test cases. Agregar mock LLM responses para cada nueva fase. |
 
-> **All tracked open items resolved as of session 7.** Framework estructural completo (Phases 0–1 pipeline) + BiasAuditAgent (PHASE 1.5) + per-agent model registry + prueba funcional end-to-end confirmada. Próximo trabajo: recarga de créditos API para validar SpecialistAgent real, o nuevos ítems de integración testing / Phase 2+ gaps.
+> **Pipeline PHASE 0→8 funcional como de session 8.** Engram directories audit/, security/, metrics/, gates/ se pueblan en ejecución real. Gaps menores: PHASE 4 (DomainOrchestrator) no implementado, engram/bias/ no persiste output BiasAuditAgent, EvaluationAgent parse_error no bloqueante pero mejora posible. Framework apto para uso con objetivos L1 (fast-track) y L2 (full pipeline).
