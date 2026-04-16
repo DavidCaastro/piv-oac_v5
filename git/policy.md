@@ -87,6 +87,7 @@ This table governs naming patterns, ownership, and lifecycle only.
 | `git add`, `git commit` within own worktree | `git merge`, `git rebase` |
 | `git status`, `git diff` in own worktree | Read another expert's worktree |
 | Use pre-commit hooks | Bypass hooks with `--no-verify` |
+| — | Push or commit to any directive branch (`architect`, `sec_ops`, `piv-directive`) |
 
 ### Domain Orchestrators (L1.5)
 
@@ -95,6 +96,7 @@ This table governs naming patterns, ownership, and lifecycle only.
 | Create `feature/<task-id>/` and subbranches | Push to `staging` or `main` |
 | Submit PR from task branch to staging | Force push any branch |
 | Prune merged worktrees | Delete `piv-directive` |
+| — | Push, commit, or open PRs against any directive branch |
 
 ### AuditAgent (L1)
 
@@ -102,6 +104,15 @@ This table governs naming patterns, ownership, and lifecycle only.
 |---|---|
 | Write to `piv-directive` (engram atoms) | Push to `main` or `staging` |
 | Append `.piv/` checkpoint files | Overwrite existing engram atoms |
+| — | Write to `architect` or `sec_ops` |
+
+### Cross-type rule (all agents)
+
+**No agent may ever commit to, push to, or open a PR against a directive branch
+from within an artifact branch context.**
+Changes to directive branches must be routed through `main` and validated by
+the framework pipeline before a human merges them into the directive branch.
+See `git/topology.md §Working on a directive branch`.
 
 ---
 

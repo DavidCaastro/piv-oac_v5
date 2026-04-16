@@ -24,9 +24,29 @@ meta-level context. They are never merged into artifact branches.
 
 **Invariants for directive branches:**
 - Never merged into `main`, `staging`, or any `feature/*` branch
+- No artifact branch ever commits to, pushes to, or opens a PR against a directive branch
 - Not subject to product CI pipelines (Gate 1 / Gate 2b / Gate 3 do not apply)
 - Agents load their configs from directive branches at session start via `sdk/core/loader.py`
 - Human push allowed on `architect` and `sec_ops`; SDK-only on `piv-directive`
+
+**Working on a directive branch:**
+
+Directive branches are not worked on directly via ad-hoc commits.
+Changes to a directive branch must go through `main` first:
+
+```
+1. Checkout main — make it the active working base
+2. Run the framework pipeline from main (piv run-async --objective "...")
+3. Framework validates, gates run, result lands in main via Gate 3
+4. Human reviews and merges validated result from main → directive branch
+```
+
+This rule ensures that every change reaching a directive branch has been
+validated by the framework's own pipeline. Directive branches are always
+receivers of validated output — never targets of direct work.
+
+Exception: initial bootstrap commits (creating the branch, first structural
+commits) may be pushed directly by the framework author.
 
 ### Artifact Branches
 
@@ -43,7 +63,8 @@ reviewed, and shipped. All agent execution (PHASE 5) happens in these branches.
 
 **Invariants for artifact branches:**
 - All changes flow bottom-up: `expert-N` → `feature/` → `staging` → `main`
-- No artifact branch reads from or merges directive branches
+- No artifact branch ever commits to, pushes to, or opens a PR against a directive branch
+- No artifact branch reads from or merges directive branch content
 - Gate verdicts are required at each merge boundary (see `git/protection.md`)
 
 ---
