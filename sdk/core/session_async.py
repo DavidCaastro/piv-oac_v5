@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sdk.core.bias_validator import BiasValidationResult, validate_bias_output
 from sdk.core.dag import DAG, DAGNode, SpecDAGParser
 from sdk.core.interview import (
     CallbackHandler,
@@ -253,6 +254,33 @@ class AsyncSession:
                 self._log(session_id, "PHASE_2", "gate_verdict", "APPROVED", 1, 0,
                           {"gate": "GATE_0", "reason": "level_1_fast_track"})
 
+            # PHASE 1.5 — BiasAuditAgent (L2 tasks only, Tier 1 validator enforced)
+            # Runs AFTER DAG confirmed, BEFORE experts execute.
+            # Gate: APPROVED continues to PHASE 5; REJECTED returns early.
+            if classification.level == 2 and not classification.fast_track:
+                bias_approved, bias_output, bias_missing = await self._run_bias_audit(
+                    session_id, active_dag, objective, classification
+                )
+                gate_verdicts["BIAS_AUDIT"] = "APPROVED" if bias_approved else "REJECTED"
+                if not bias_approved:
+                    self._broker.send(gate_verdict(
+                        agent_id="BiasAuditAgent",
+                        session_id=session_id,
+                        gate=GateId.GATE_1,
+                        verdict=Verdict.REJECTED,
+                        rationale="BiasAudit output missing: " + "; ".join(bias_missing),
+                    ))
+                    self._session_mgr.close(session_id, status="failed")  # type: ignore
+                    _result_for_index = AsyncSessionResult(
+                        session_id=session_id,
+                        objective=objective,
+                        status="bias_rejected",
+                        gate_verdicts=gate_verdicts,
+                        duration_ms=_now_ms() - start_ms,
+                        warnings=["BiasAudit REJECTED: " + "; ".join(bias_missing)],
+                    )
+                    return _result_for_index
+
             # PHASE 5 — Parallel SpecialistAgent execution
             self._session_mgr.update(session_id, {"phase": "PHASE_5"})
             completed_ids: set[str] = set()
@@ -441,6 +469,151 @@ class AsyncSession:
                         _build_index_entry(_result_for_index, classification, self._provider_name)
                     )
                 self._telemetry.close()
+
+    # ------------------------------------------------------------------
+    # BiasAuditAgent — PHASE 1.5 (L2 tasks only)
+    # ------------------------------------------------------------------
+
+    async def _run_bias_audit(
+        self,
+        session_id: str,
+        dag: DAG,
+        objective: str,
+        classification: ClassificationResult,
+    ) -> tuple[bool, str, list[str]]:
+        """Invoke BiasAuditAgent and validate output deterministically.
+
+        Runs as PHASE 1.5 — after DAG confirmed, before PHASE 5 expert execution.
+        Only activates for complexity level == 2 (architectural tasks).
+
+        Flow:
+            1. Load bias_auditor agent config (loader, Tier 1)
+            2. Load bias-audit skill (SHA-256 verified, Tier 1)
+            3. Build system prompt: agent + contract + base + skill
+            4. Call LLM provider (Tier 3 — same provider as L2 experts)
+            5. validate_bias_output() — Tier 1 deterministic check
+            6. Emit GATE_VERDICT(APPROVED) or log missing sections
+            7. Emit CHECKPOINT_REQ after audit completes
+
+        Returns:
+            tuple(approved: bool, output_text: str, missing_sections: list[str])
+        """
+        self._log(session_id, "PHASE_1_5", "bias_audit_start", "OK", 1, 0, {
+            "dag_nodes": len(dag.nodes),
+            "complexity": classification.level,
+        })
+
+        # Tier 1 — load agent config (no LLM)
+        try:
+            agent_cfg  = self._loader.load_agent("bias_auditor")
+            skill_cfg  = self._loader.load_skill("bias-audit")
+        except (FileNotFoundError, PermissionError) as exc:
+            self._log(session_id, "PHASE_1_5", "bias_audit_load_error", "WARN", 1, 0,
+                      {"error": str(exc)})
+            # Non-fatal: if agent files missing, skip audit with warning
+            return True, "", []
+
+        # Build system prompt: agent identity + contract + base contract + skill
+        system_prompt = (
+            f"{agent_cfg.agent_md}\n\n"
+            f"--- CONTRACT ---\n{agent_cfg.contract_md}\n\n"
+            f"--- BASE CONTRACT ---\n{agent_cfg.base_md}\n\n"
+            f"--- BIAS AUDIT SKILL ---\n{skill_cfg.content}"
+        )
+
+        # Build user message: DAG proposal + objective for audit
+        node_descriptions = "\n".join(
+            f"- [{n.node_id}] domain={n.domain}: {n.description} "
+            f"(files: {', '.join(n.files_in_scope) or 'TBD'})"
+            for n in dag.nodes
+        )
+        user_message = (
+            f"## Architectural Proposal to Audit\n\n"
+            f"**Objective:** {objective}\n\n"
+            f"**Complexity:** Level {classification.level}\n\n"
+            f"**DAG nodes ({len(dag.nodes)}):**\n{node_descriptions}\n\n"
+            f"Apply all four Audit Directives (Ecosystem Neutrality, "
+            f"Red Teaming Semántico, Multi-LLM Interoperability Audit, "
+            f"Deterministic Logic Preservation).\n\n"
+            f"Your output MUST end with the complete "
+            f"'## Análisis de Sesgos y Dependencias' section."
+        )
+
+        # Tier 3 — LLM call (same provider as L2 experts)
+        provider = self._router.get_provider(
+            self._router.resolve_tier("L1")  # BiasAuditAgent is L1 → Tier 3
+        )
+
+        output_text = ""
+        if provider is not None:
+            try:
+                req = ProviderRequest(
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_message}],
+                    max_tokens=4096,
+                )
+                resp: ProviderResponse = await provider.complete(req)
+                output_text = resp.content
+                self._log(session_id, "PHASE_1_5", "bias_audit_llm", "OK",
+                          resp.tokens_used, resp.tokens_used, {
+                              "provider": type(provider).__name__,
+                          })
+            except Exception as exc:  # noqa: BLE001
+                self._log(session_id, "PHASE_1_5", "bias_audit_llm_error", "WARN", 1, 0,
+                          {"error": str(exc)[:200]})
+                # LLM failure → skip audit (non-fatal) to avoid blocking session
+                return True, "", []
+        else:
+            # No provider available (e.g. Tier 3 not configured) → skip
+            self._log(session_id, "PHASE_1_5", "bias_audit_no_provider", "WARN", 1, 0, {})
+            return True, "", []
+
+        # Tier 1 — deterministic validation
+        validation: BiasValidationResult = validate_bias_output(output_text)
+
+        # Log warnings regardless of pass/fail
+        for w in validation.warnings:
+            self._log(session_id, "PHASE_1_5", "bias_audit_warning", "WARN", 1, 0,
+                      {"warning": w})
+        for risk in validation.lock_in_risks:
+            self._log(session_id, "PHASE_1_5", "bias_audit_lock_in", "WARN", 1, 0,
+                      {"risk": risk})
+
+        if validation.valid:
+            # PMIA: APPROVED gate verdict
+            self._broker.send(gate_verdict(
+                agent_id="BiasAuditAgent",
+                session_id=session_id,
+                gate=GateId.GATE_1,
+                verdict=Verdict.APPROVED,
+                rationale=(
+                    f"BiasAudit passed. red_team={validation.red_team_result} "
+                    f"multi_llm={validation.multi_llm_result}"
+                ),
+            ))
+            self._log(session_id, "PHASE_1_5", "bias_audit_verdict", "APPROVED", 1, 0, {
+                "red_team": validation.red_team_result,
+                "multi_llm": validation.multi_llm_result,
+            })
+        else:
+            self._log(session_id, "PHASE_1_5", "bias_audit_verdict", "REJECTED", 1, 0, {
+                "missing": validation.missing_sections,
+            })
+
+        # PMIA: checkpoint after audit regardless of outcome
+        self._broker.send(checkpoint_req(
+            agent_id="BiasAuditAgent",
+            session_id=session_id,
+            phase="PHASE_1_5",
+            state_summary=(
+                f"BiasAudit {'PASSED' if validation.valid else 'REJECTED'}. "
+                f"red_team={validation.red_team_result} "
+                f"multi_llm={validation.multi_llm_result} "
+                f"missing={len(validation.missing_sections)}."
+            ),
+        ))
+
+        return validation.valid, output_text, validation.missing_sections
 
     # ------------------------------------------------------------------
     # Parallel specialist execution
