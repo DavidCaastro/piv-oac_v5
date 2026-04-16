@@ -26,6 +26,7 @@ from typing import Any
 
 from sdk.core.bias_validator import BiasValidationResult, validate_bias_output
 from sdk.core.dag import DAG, DAGNode, SpecDAGParser
+from sdk.core.model_registry import resolve_model
 from sdk.core.interview import (
     CallbackHandler,
     PreSuppliedHandler,
@@ -539,10 +540,12 @@ class AsyncSession:
             f"'## Análisis de Sesgos y Dependencias' section."
         )
 
-        # Tier 3 — LLM call (same provider as L2 experts)
+        # Tier 3 — LLM call (BiasAuditAgent is L1 → always cloud)
         provider = self._router.get_provider(
-            self._router.resolve_tier("L1")  # BiasAuditAgent is L1 → Tier 3
+            self._router.resolve_tier("L1")
         )
+        # Model registry: bias_auditor → FLAGSHIP (architectural decisions, high risk)
+        bias_model = resolve_model("bias_auditor", self._provider_name)
 
         output_text = ""
         if provider is not None:
@@ -550,13 +553,15 @@ class AsyncSession:
                 req = ProviderRequest(
                     system=system_prompt,
                     messages=[{"role": "user", "content": user_message}],
+                    model=bias_model,
                     max_tokens=4096,
                 )
                 resp: ProviderResponse = await provider.complete(req)
                 output_text = resp.content
                 self._log(session_id, "PHASE_1_5", "bias_audit_llm", "OK",
-                          resp.tokens_used, resp.tokens_used, {
+                          resp.input_tokens + resp.output_tokens, resp.output_tokens, {
                               "provider": type(provider).__name__,
+                              "model":    resp.model,
                           })
             except Exception as exc:  # noqa: BLE001
                 self._log(session_id, "PHASE_1_5", "bias_audit_llm_error", "WARN", 1, 0,
@@ -642,12 +647,20 @@ class AsyncSession:
         tier        = self._router.resolve_tier(agent_level)
         provider    = self._router.get_provider(tier)
 
+        # Model registry: specialist_agent gets FAST for complexity=1, BALANCED for complexity=2
+        model = resolve_model(
+            "specialist_agent",
+            self._provider_name,
+            task_complexity=classification.level,
+        )
+
         self._log(session_id, "PHASE_5", "provider_routed", "OK", tier.value, 0, {
             "node_id":      node.node_id,
             "complexity":   classification.level,
             "agent_level":  agent_level,
             "tier":         tier.name,
             "provider":     type(provider).__name__ if provider else "none",
+            "model":        model,
         })
 
         # Worktree creation (Tier 1 — SafeLocalExecutor, non-fatal on failure)
@@ -682,7 +695,7 @@ class AsyncSession:
 
             request = ProviderRequest(
                 messages=messages,
-                model=provider.model if hasattr(provider, "model") else "",
+                model=model,
                 system=system_prompt,
             )
 
