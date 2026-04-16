@@ -38,7 +38,10 @@ from sdk.metrics import TelemetryLogger
 from sdk.providers import ProviderRouter, Tier
 from sdk.providers.anthropic import AnthropicProvider
 from sdk.providers.ollama import OllamaProvider
-from sdk.providers.openai import OpenAIProvider
+try:
+    from sdk.providers.openai import OpenAIProvider
+except ImportError:
+    OpenAIProvider = None  # type: ignore[assignment,misc]
 from sdk.utils.complexity import ComplexityClassifier
 from sdk.vault import Vault
 
