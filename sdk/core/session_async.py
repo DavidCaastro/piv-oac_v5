@@ -433,6 +433,18 @@ class AsyncSession:
                     "expert_count":   len(all_expert_results),
                     "gate_verdicts":  gate_verdicts,
                     "warning_count":  len(warnings),
+                    "experts": [
+                        {
+                            "expert_id":    r.expert_id,
+                            "node_id":      r.node_id,
+                            "success":      r.success,
+                            "tokens_used":  r.tokens_used,
+                            "duration_ms":  r.duration_ms,
+                            "error":        r.error,
+                            "content":      r.content[:8000] if r.content else "",
+                        }
+                        for r in all_expert_results
+                    ],
                 },
                 session_id=session_id,
             )
