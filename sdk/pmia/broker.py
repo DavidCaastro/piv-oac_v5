@@ -18,6 +18,7 @@ import hashlib
 import hmac
 import logging
 import os
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -32,7 +33,8 @@ from .messages import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_RETRIES = 2   # contracts/_base.md §3: max 2 attempts before PROTOCOL_VIOLATION
+_MAX_RETRIES    = 2        # contracts/_base.md §3: max 2 attempts before PROTOCOL_VIOLATION
+_MESSAGE_TTL_MS = 30_000   # 30 s — replay-attack prevention
 
 
 class PMIABroker:
@@ -95,6 +97,18 @@ class PMIABroker:
             validate_size(msg)
         except PMIAError as exc:
             return self._handle_retry(msg, str(exc))
+
+        # 1b — TTL check (replay-attack prevention)
+        now_ms = int(time.time() * 1000)
+        age_ms = now_ms - msg.timestamp_ms
+        if age_ms > _MESSAGE_TTL_MS:
+            raise PMIAError(
+                f"Message from {msg.agent_id} expired: age={age_ms}ms > TTL={_MESSAGE_TTL_MS}ms"
+            )
+        if age_ms < -5000:
+            raise PMIAError(
+                f"Message from {msg.agent_id} has future timestamp: age={age_ms}ms"
+            )
 
         # 2 — sign
         signed = self._sign(msg)

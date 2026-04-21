@@ -6,6 +6,7 @@ Falls back to AsyncAnthropicProvider if Ollama is unreachable.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 
@@ -14,7 +15,10 @@ import httpx
 from .base import ProviderError, ProviderRequest, ProviderResponse
 
 _DEFAULT_HOST = "http://localhost:11434"
-_TIMEOUT = 120.0
+_TIMEOUT      = 120.0
+_MAX_RETRIES  = 3
+_BASE_DELAY_S = 1.0
+_RETRYABLE_ERRORS = (httpx.ConnectError, httpx.RemoteProtocolError)
 
 
 class AsyncOllamaProvider:
@@ -39,7 +43,9 @@ class AsyncOllamaProvider:
             return False
 
     async def complete(self, request: ProviderRequest) -> ProviderResponse:
-        """Async call to Ollama /api/chat endpoint.
+        """Async call to Ollama /api/chat endpoint with retry on connection errors.
+
+        Retries on ConnectError and RemoteProtocolError with exponential backoff.
 
         Raises:
             ProviderError: If Ollama is unreachable or returns an error.
@@ -58,22 +64,31 @@ class AsyncOllamaProvider:
             },
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                resp = await client.post(f"{self._host}/api/chat", json=payload)
-                resp.raise_for_status()
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                    resp = await client.post(f"{self._host}/api/chat", json=payload)
+                    resp.raise_for_status()
 
-            data = resp.json()
-            content = data.get("message", {}).get("content", "")
+                data = resp.json()
+                content = data.get("message", {}).get("content", "")
 
-            return ProviderResponse(
-                content=content,
-                model=data.get("model", request.model or self.model),
-                input_tokens=data.get("prompt_eval_count", 0),
-                output_tokens=data.get("eval_count", 0),
-                raw=data,
-            )
-        except httpx.HTTPError as exc:
-            raise ProviderError(f"Ollama async request failed: {exc}") from exc
-        except (json.JSONDecodeError, KeyError) as exc:
-            raise ProviderError(f"Ollama async response parse error: {exc}") from exc
+                return ProviderResponse(
+                    content=content,
+                    model=data.get("model", request.model or self.model),
+                    input_tokens=data.get("prompt_eval_count", 0),
+                    output_tokens=data.get("eval_count", 0),
+                    raw=data,
+                )
+            except _RETRYABLE_ERRORS as exc:
+                last_exc = exc
+                await asyncio.sleep(_BASE_DELAY_S * (2 ** attempt))
+            except httpx.HTTPError as exc:
+                raise ProviderError(f"Ollama async request failed: {exc}") from exc
+            except (json.JSONDecodeError, KeyError) as exc:
+                raise ProviderError(f"Ollama async response parse error: {exc}") from exc
+
+        raise ProviderError(
+            f"Ollama provider exhausted {_MAX_RETRIES} retries: {last_exc}"
+        ) from last_exc

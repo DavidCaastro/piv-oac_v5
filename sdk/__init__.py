@@ -43,6 +43,16 @@ try:
     from sdk.providers.openai import OpenAIProvider
 except ImportError:
     OpenAIProvider = None  # type: ignore[assignment,misc]
+from sdk.exceptions import (  # noqa: F401
+    AgentUnrecoverable,
+    CircuitOpen,
+    GateRejected,
+    MalformedOutput,
+    MessageExpired,
+    MessageTampered,
+    PIVOACError,
+    VetoError,
+)
 from sdk.utils.complexity import ComplexityClassifier
 from sdk.vault import Vault
 
@@ -65,6 +75,15 @@ __all__ = [
     "SessionManager",
     "TelemetryLogger",
     "ComplexityClassifier",
+    # Exceptions
+    "PIVOACError",
+    "AgentUnrecoverable",
+    "GateRejected",
+    "VetoError",
+    "MalformedOutput",
+    "CircuitOpen",
+    "MessageExpired",
+    "MessageTampered",
 ]
 
 

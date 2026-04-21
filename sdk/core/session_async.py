@@ -23,7 +23,9 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sdk.agents.base import AgentBase
 from sdk.core.bias_validator import BiasValidationResult, validate_bias_output
+from sdk.core.contract_parser import ContractParser
 from sdk.core.dag import DAG, DAGNode, SpecDAGParser
 from sdk.core.interview import (
     CallbackHandler,
@@ -282,6 +284,8 @@ class AsyncSession:
                     )
                     return _result_for_index
 
+            sec_rationale = ""  # elevated scope — used by PHASE 4
+
             # PHASE 3 — SecurityAgent Gate 0 (L2 non-fast-track only)
             # Sole evaluator for L2 tasks. REJECTED halts before any LLM cost in PHASE 5.
             if classification.level == 2 and not classification.fast_track:
@@ -298,6 +302,24 @@ class AsyncSession:
                         gate_verdicts=gate_verdicts,
                         duration_ms=_now_ms() - start_ms,
                         warnings=[f"SecurityAgent Gate 0 REJECTED: {sec_rationale}"],
+                    )
+                    return _result_for_index
+
+            # PHASE 4 — DomainOrchestrator Gate 2 (L2 non-fast-track only)
+            if classification.level == 2 and not classification.fast_track:
+                dom_approved, _domain_plan, dom_rationale = await self._run_domain_orchestrator(
+                    session_id, active_dag, objective, sec_rationale
+                )
+                gate_verdicts["GATE_2"] = "APPROVED" if dom_approved else "REJECTED"
+                if not dom_approved:
+                    self._session_mgr.close(session_id, status="failed")  # type: ignore
+                    _result_for_index = AsyncSessionResult(
+                        session_id=session_id,
+                        objective=objective,
+                        status="domain_plan_rejected",
+                        gate_verdicts=gate_verdicts,
+                        duration_ms=_now_ms() - start_ms,
+                        warnings=[f"DomainOrchestrator Gate 2 REJECTED: {dom_rationale}"],
                     )
                     return _result_for_index
 
@@ -662,6 +684,24 @@ class AsyncSession:
                 "missing": validation.missing_sections,
             })
 
+        # Engram: persist bias audit result (best-effort, non-blocking)
+        try:
+            self._engram.append(
+                f"bias/{session_id}/audit.md",
+                (
+                    f"## BiasAudit — {_iso_now()}\n\n"
+                    f"**Objective:** {objective[:200]}\n\n"
+                    f"**Verdict:** {'PASSED' if validation.valid else 'REJECTED'}\n"
+                    f"**Red team:** {validation.red_team_result}\n"
+                    f"**Multi-LLM:** {validation.multi_llm_result}\n"
+                    f"**Missing:** {validation.missing_sections or 'none'}\n\n"
+                    f"**Output:**\n{output_text[:4000]}\n"
+                ),
+                session_id,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
         # PMIA: checkpoint after audit regardless of outcome
         self._broker.send(checkpoint_req(
             agent_id="BiasAuditAgent",
@@ -752,8 +792,8 @@ class AsyncSession:
             self._log(session_id, "PHASE_3", "security_gate_no_provider", "WARN", 1, 0, {})
             return True, "no provider available — gate skipped"
 
-        approved  = _parse_verdict(output_text)
-        rationale = _extract_rationale(output_text)
+        approved  = ContractParser.parse_verdict(output_text)
+        rationale = ContractParser.extract_rationale(output_text)
 
         if not approved:
             try:
@@ -787,6 +827,105 @@ class AsyncSession:
             ),
         ))
         return approved, rationale
+
+    # ------------------------------------------------------------------
+    # DomainOrchestrator — PHASE 4 (Gate 2, L2 non-fast-track only)
+    # ------------------------------------------------------------------
+
+    async def _run_domain_orchestrator(
+        self,
+        session_id: str,
+        dag: DAG,
+        objective: str,
+        sec_rationale: str,
+    ) -> tuple[bool, str, str]:
+        """Invoke DomainOrchestrator as Gate 2 evaluator for L2 architectural tasks.
+
+        Runs after SecurityAgent (PHASE 3) passes. Evaluates domain decomposition
+        and integration plan before specialist execution.
+
+        Returns:
+            tuple(approved: bool, domain_plan: str, rationale: str)
+            On config/LLM failure returns (True, "", "skipped") — non-fatal.
+        """
+        self._log(session_id, "PHASE_4", "domain_orchestrator_start", "OK", 1, 0,
+                  {"dag_nodes": len(dag.nodes)})
+
+        try:
+            agent_cfg = self._loader.load_agent("domain_orchestrator")
+        except (FileNotFoundError, PermissionError) as exc:
+            self._log(session_id, "PHASE_4", "domain_orchestrator_load_error", "WARN", 1, 0,
+                      {"error": str(exc)})
+            return True, "", "domain_orchestrator config missing — gate skipped"
+
+        node_descriptions = "\n".join(
+            f"- [{n.node_id}] domain={n.domain}: {n.description} "
+            f"(files: {', '.join(n.files_in_scope) or 'TBD'})"
+            for n in dag.nodes.values()
+        )
+        user_message = (
+            f"## Gate 2 Domain Orchestration Review\n\n"
+            f"**Objective:** {objective}\n\n"
+            f"**DAG nodes ({len(dag.nodes)}):**\n{node_descriptions}\n\n"
+            f"**Gate 0 rationale:** {sec_rationale[:200] if sec_rationale else 'not run'}\n\n"
+            f"Evaluate the domain decomposition plan: domain boundaries, specialist "
+            f"assignment, inter-domain dependencies, integration risks.\n\n"
+            f"End your response with exactly one of:\n"
+            f"GATE_VERDICT: APPROVED\n"
+            f"GATE_VERDICT: REJECTED — <reason max 100 tokens>"
+        )
+
+        provider = self._router.get_provider(self._router.resolve_tier("L1"))
+        dom_model = resolve_model("domain_orchestrator", self._provider_name)
+
+        output_text = ""
+        if provider is not None:
+            try:
+                req = ProviderRequest(
+                    system=(
+                        f"{agent_cfg.agent_md}\n\n"
+                        f"--- CONTRACT ---\n{agent_cfg.contract_md}\n\n"
+                        f"--- BASE CONTRACT ---\n{agent_cfg.base_md}"
+                    ),
+                    messages=[{"role": "user", "content": user_message}],
+                    model=dom_model,
+                    max_tokens=2048,
+                )
+                resp: ProviderResponse = await provider.complete(req)
+                output_text = resp.content
+                self._log(session_id, "PHASE_4", "domain_orchestrator_llm", "OK",
+                          resp.input_tokens + resp.output_tokens, resp.output_tokens,
+                          {"model": resp.model})
+            except Exception as exc:  # noqa: BLE001
+                self._log(session_id, "PHASE_4", "domain_orchestrator_llm_error", "WARN", 1, 0,
+                          {"error": str(exc)[:200]})
+                return True, "", "LLM call failed — gate skipped"
+        else:
+            self._log(session_id, "PHASE_4", "domain_orchestrator_no_provider", "WARN", 1, 0, {})
+            return True, "", "no provider available — gate skipped"
+
+        approved  = ContractParser.parse_verdict(output_text)
+        rationale = ContractParser.extract_rationale(output_text)
+
+        self._broker.send(gate_verdict(
+            agent_id="DomainOrchestrator",
+            session_id=session_id,
+            gate=GateId.GATE_2,
+            verdict=Verdict.APPROVED if approved else Verdict.REJECTED,
+            rationale=rationale,
+        ))
+        self._log(session_id, "PHASE_4", "domain_orchestrator_verdict",
+                  "APPROVED" if approved else "REJECTED", 1, 0,
+                  {"rationale": rationale[:100]})
+        self._broker.send(checkpoint_req(
+            agent_id="DomainOrchestrator",
+            session_id=session_id,
+            phase="PHASE_4",
+            state_summary=(
+                f"Gate 2 {'APPROVED' if approved else 'REJECTED'}. {rationale[:100]}"
+            ),
+        ))
+        return approved, output_text, rationale
 
     # ------------------------------------------------------------------
     # EvaluationAgent — PHASE 6 (post-PHASE 5, non-blocking)
@@ -860,7 +999,10 @@ class AsyncSession:
                     max_tokens=512,
                 )
                 resp: ProviderResponse = await provider.complete(req)
-                score_entry = _parse_eval_scores(resp.content, result.expert_id, session_id)
+                score_result = ContractParser.parse_eval_scores(
+                    resp.content, result.expert_id, session_id
+                )
+                score_entry = score_result.to_dict()
                 score_entry["tokens_used"] = resp.input_tokens + resp.output_tokens
                 all_scores.append(score_entry)
                 self._log(session_id, "PHASE_6", "evaluation_scored", "OK",
@@ -986,8 +1128,8 @@ class AsyncSession:
             self._log(session_id, "PHASE_7", "coherence_gate_no_provider", "WARN", 1, 0, {})
             return True, "no provider available — gate skipped"
 
-        approved      = _parse_verdict(output_text)
-        rationale     = _extract_rationale(output_text)
+        approved      = ContractParser.parse_verdict(output_text)
+        rationale     = ContractParser.extract_rationale(output_text)
         multi_node    = len(dag.nodes) > 1
         # Single-node: advisory (not hard gate per contract for single-expert case)
         eff_approved  = approved or not multi_node
@@ -1106,20 +1248,26 @@ class AsyncSession:
                 system=system_prompt,
             )
 
-            response: ProviderResponse = await provider.complete(request)
+            agent_result = await AgentBase.call(
+                provider=provider,
+                request=request,
+                agent_id=expert_id,
+                session_id=session_id,
+            )
             duration = _now_ms() - start_ms
 
             self._log(session_id, "PHASE_5", "specialist_complete", "OK", 2,
-                      response.output_tokens,
-                      {"expert_id": expert_id, "node_id": node.node_id})
+                      agent_result.output_tokens,
+                      {"expert_id": expert_id, "node_id": node.node_id,
+                       "attempts": agent_result.attempts})
 
             await self._executor.run("worktree_remove", [wt_name])
             return ExpertResult(
                 expert_id=expert_id,
                 node_id=node.node_id,
                 success=True,
-                content=response.content,
-                tokens_used=response.input_tokens + response.output_tokens,
+                content=agent_result.content,
+                tokens_used=agent_result.tokens_used,
                 duration_ms=duration,
             )
 
@@ -1243,74 +1391,6 @@ def _iso_now() -> str:
     import time as _t
     return _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime())
 
-
-def _parse_verdict(text: str) -> bool:
-    """Parse APPROVED/REJECTED from an agent LLM output. Default: APPROVED.
-
-    Looks for: GATE_VERDICT: APPROVED|REJECTED, then standalone REJECTED line.
-    """
-    import re
-    m = re.search(r"GATE_VERDICT\s*:\s*(APPROVED|REJECTED)", text, re.IGNORECASE)
-    if m:
-        return m.group(1).upper() == "APPROVED"
-    if re.search(r"^\s*REJECTED\b", text, re.IGNORECASE | re.MULTILINE):
-        return False
-    return True  # default: approved when verdict unclear (non-fatal)
-
-
-def _extract_rationale(text: str) -> str:
-    """Extract the inline rationale after GATE_VERDICT: REJECTED — <reason>."""
-    import re
-    m = re.search(
-        r"GATE_VERDICT\s*:\s*(?:APPROVED|REJECTED)\s*[—\-]?\s*(.+?)(?:\n|$)",
-        text, re.IGNORECASE,
-    )
-    if m:
-        return m.group(1).strip()[:200]
-    return text[:200].replace("\n", " ")
-
-
-def _parse_eval_scores(text: str, expert_id: str, session_id: str) -> dict:
-    """Extract JSON scores block from EvaluationAgent LLM output.
-
-    Expects a ```json ... ``` block with keys: scores.{FUNC,SEC,QUAL,COH,FOOT}.
-    Falls back to a zero-score entry with parse_error=True on any failure.
-    """
-    import json as _json
-    import re
-
-    m = re.search(r"```json\s*(\{.*?\})\s*```", text, re.DOTALL)
-    if m:
-        try:
-            data = _json.loads(m.group(1))
-            scores = data.get("scores", {})
-            aggregate = round(
-                scores.get("FUNC", 0) * 0.35
-                + scores.get("SEC", 0) * 0.25
-                + scores.get("QUAL", 0) * 0.20
-                + scores.get("COH", 0) * 0.15
-                + scores.get("FOOT", 0) * 0.05,
-                3,
-            )
-            return {
-                "session_id":   session_id,
-                "expert_id":    expert_id,
-                "phase":        "PHASE_6",
-                "scores":       scores,
-                "aggregate":    aggregate,
-                "timestamp_ms": _now_ms(),
-            }
-        except (ValueError, KeyError):
-            pass
-    return {
-        "session_id":   session_id,
-        "expert_id":    expert_id,
-        "phase":        "PHASE_6",
-        "scores":       {},
-        "aggregate":    0.0,
-        "parse_error":  True,
-        "timestamp_ms": _now_ms(),
-    }
 
 
 def _build_index_entry(
